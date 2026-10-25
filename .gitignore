@@ -1,8 +1,23 @@
+# macOS
 .DS_Store
 .DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
+
+# Windows
 ehthumbs.db
 Thumbs.db
+
+# 编辑器
+.vscode/
+.idea/
+
+# 依赖 / 构建产物 / 打包
+node_modules/
+dist/
+build/
+*.zip
+*.crx
+*.pem
 *.log

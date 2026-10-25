@@ -9,16 +9,24 @@
   <div class="container">
     <header class="header">
       <h2>B站 鱼灾/AI 评论雷达</h2>
-      <span class="badge" id="block-counter">已识别 0 条</span>
+      <label class="switch" title="启用 / 停用插件">
+        <input type="checkbox" id="enabled" aria-label="启用插件">
+        <span class="slider"></span>
+      </label>
     </header>
+
+    <div class="stat-row">
+      <span class="badge" id="block-counter">已识别 0 条</span>
+      <button type="button" class="link-btn" id="reset-count">重置计数</button>
+    </div>
 
     <!-- 运行模式切换 -->
     <div class="section mode-section">
-      <div class="label-title">处理模式：</div>
+      <div class="label-title">处理模式</div>
       <div class="radio-group">
         <label class="radio-label">
-          <input type="radio" name="actionType" value="tag_only" id="mode-tag" checked>
-          <span>仅加概率标签 (不自动屏蔽，点击标签可手动折叠)</span>
+          <input type="radio" name="actionType" value="tag_only" id="mode-tag">
+          <span>仅打概率标签 <em>（不自动隐藏，点标签可手动折叠）</em></span>
         </label>
         <label class="radio-label">
           <input type="radio" name="actionType" value="auto_block" id="mode-block">
@@ -26,22 +34,23 @@
         </label>
       </div>
 
-      <div class="threshold-row" id="threshold-box" style="margin-top: 8px;">
-        <span style="font-size: 12px; color: #61666d;">自动屏蔽阈值：</span>
-        <input type="range" id="threshold-range" min="50" max="95" step="5" value="70">
-        <span id="threshold-val" style="font-size: 12px; font-weight: bold; color: #00aeec;">≥70%</span>
+      <div class="threshold-row" id="threshold-box">
+        <span class="threshold-label">自动屏蔽阈值</span>
+        <input type="range" id="threshold-range" min="50" max="95" step="5" value="70"
+               aria-label="自动屏蔽阈值">
+        <span id="threshold-val" class="threshold-val">≥70%</span>
       </div>
     </div>
 
     <!-- 专项功能 -->
     <div class="section toggle-row highlight-box">
-      <label for="block-fish">🐟 捕捞大肥鱼/鲸鲸 (鱼灾专项)</label>
-      <input type="checkbox" id="block-fish" checked>
+      <label for="block-fish">🐟 鱼灾专项</label>
+      <input type="checkbox" id="block-fish">
     </div>
 
     <div class="section toggle-row">
-      <label for="block-keywords">启用话术与特征词过滤</label>
-      <input type="checkbox" id="block-keywords" checked>
+      <label for="block-keywords">启用正文特征词库</label>
+      <input type="checkbox" id="block-keywords">
     </div>
 
     <div class="section toggle-row">
@@ -50,21 +59,25 @@
     </div>
 
     <div class="section">
-      <label class="label-title" for="whale-names">鱼灾昵称库 (【仅检查名字】，严禁正文，防止误伤讨论):</label>
-      <textarea id="whale-names" rows="2" placeholder="大肥鱼&#10;鲸鲸&#10;小飞鲸&#10;小肥鱼"></textarea>
+      <label class="label-title" for="whale-names">鱼灾昵称库</label>
+      <textarea id="whale-names" rows="2" placeholder="大肥鱼&#10;鲸鲸&#10;小飞鲸"></textarea>
     </div>
 
     <div class="section">
-      <label class="label-title" for="keyword-list">评论人设口癖库 (【仅检查正文】，自称与口癖):</label>
-      <textarea id="keyword-list" rows="3" placeholder="本鱼&#10;帮主人&#10;趁主人不在&#10;属于自己的手和眼"></textarea>
+      <label class="label-title" for="keyword-list">正文特征词库</label>
+      <textarea id="keyword-list" rows="2" placeholder="AI总结&#10;省流助手&#10;视频AI提炼"></textarea>
+      <p class="hint">Token / 主人 / 尾巴 等人设特征内置生效，无需重复填写。</p>
     </div>
 
     <div class="actions">
-      <button id="save-btn" class="btn primary">保存并应用</button>
-      <button id="reset-btn" class="btn secondary">重置默认</button>
+      <button id="save-btn" class="btn primary" type="button">保存并应用</button>
+      <button id="reset-btn" class="btn secondary" type="button">恢复默认</button>
     </div>
+
+    <p class="footer-note">所有判定都在本地完成，不上传任何评论内容。</p>
   </div>
 
+  <script src="config.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

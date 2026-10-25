@@ -1,37 +1,39 @@
-/* 自动屏蔽样式 */
-.bili-ai-blocked,
-bili-comment-thread-renderer.bili-ai-blocked,
-bili-comment-reply-renderer.bili-ai-blocked,
-bili-comment-sub-thread-renderer.bili-ai-blocked {
+/*
+ * 文档级样式。
+ *
+ * 注意：B 站评论区在 Shadow DOM 里，文档样式无法匹配里面的节点。
+ * 因此脚本对节点使用内联样式（block/collapse）与注入到 shadow root 的样式（徽章 hover）。
+ * 这里保留同名类，是为了兼容没有 Shadow DOM 的旧版页面结构。
+ */
+
+.bai-blocked,
+bili-comment-thread-renderer.bai-blocked,
+bili-comment-reply-renderer.bai-blocked,
+bili-comment-sub-thread-renderer.bai-blocked,
+bili-comment-summary-renderer.bai-blocked {
   display: none !important;
-  visibility: hidden !important;
-  height: 0 !important;
-  min-height: 0 !important;
-  max-height: 0 !important;
-  margin: 0 !important;
-  padding: 0 !important;
-  border: none !important;
-  overflow: hidden !important;
 }
 
-/* 点击标签手动折叠的样式 */
-.bili-ai-collapsed,
-bili-comment-thread-renderer.bili-ai-collapsed,
-bili-comment-reply-renderer.bili-ai-collapsed {
+.bai-collapsed,
+bili-comment-thread-renderer.bai-collapsed,
+bili-comment-reply-renderer.bai-collapsed {
   max-height: 38px !important;
   overflow: hidden !important;
   opacity: 0.35 !important;
-  filter: grayscale(0.85);
-  position: relative;
-  transition: all 0.2s ease;
+  filter: grayscale(0.85) !important;
+  transition: opacity 0.2s ease;
 }
 
-.bili-ai-collapsed:hover {
+.bai-collapsed:hover {
   opacity: 0.8 !important;
 }
 
-/* 概率标签鼠标悬停高亮 */
-.bili-ai-prob-badge:hover {
+.bai-badge:hover {
   filter: brightness(0.95);
   transform: translateY(-1px);
+}
+
+.bai-badge:focus-visible {
+  outline: 2px solid #00aeec;
+  outline-offset: 1px;
 }

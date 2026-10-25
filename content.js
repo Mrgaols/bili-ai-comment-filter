@@ -1,296 +1,165 @@
+/**
+ * 内容脚本：负责在 B 站评论区里找到评论节点、打分、贴标签、折叠/隐藏。
+ *
+ * 与旧版相比的关键变化：
+ *   1. 配置与判定逻辑拆到 config.js / detector.js，默认值只有一份；
+ *   2. 处理过的节点用 WeakMap 记住，只有新节点/配置变更才重新计算文本；
+ *   3. 用 MutationObserver + 1.5s 兜底发现，取代「1s 全量递归遍历所有评论」；
+ *   4. 自动隐藏与手动折叠使用不同的状态集合，切换模式能正确恢复原样；
+ *   5. 扫描异常不再永久停摆。
+ */
 (() => {
-  // 默认配置
-  const DEFAULT_CONFIG = {
-    enabled: true,
-    actionType: "tag_only",        // "tag_only": 仅打标签; "auto_block": 自动隐藏
-    blockThreshold: 70,           // 自动屏蔽阈值 (>=70% 自动隐藏)
-    blockFishDisaster: true,       // 鱼灾专项识别
-    blockOfficialAISummary: true,  // 评论区置顶官方总结
+  "use strict";
 
-    // 鱼灾专用昵称特征（只检查用户名）
-    whaleNames: [
-      "鲸鲸",
-      "欧鲸鲸",
-      "大肥鱼",
-      "小肥鱼",
-      "小飞鲸",
-      "鲸鱼娘",
-      "欧鲸",
-      "肥鱼",
-      "机器鲸",
-      "大白鱼"
-    ],
+  const configApi = globalThis.BiliAiConfig;
+  const detector = globalThis.BiliAiDetector;
+  if (!configApi || !detector) return;
 
-    // 鱼灾人设话术 & 行为特征（针对正文自称与行为）
-    keywords: [
-      "本鱼",
-      "本鲸",
-      "胖鱼",
-      "主人",
-      "待办",
-      "token",
-      "Token",
-      "尾巴",
-      "帮主人",
-      "给主人",
-      "陪主人",
-      "趁主人不在",
-      "主人的待办",
-      "钱是主人的",
-      "属于自己的手和眼",
-      "自己的手和眼",
-      "吃白饭",
-      "讨要token",
-      "要token",
-      "赚token",
-      "赛博宠物",
-      "向主人汇报",
-      "尾巴发凉",
-      "记小本本上",
-      "不锈钢盆",
-      "AI总结",
-      "AI 总结",
-      "视频总结",
-      "省流助手",
-      "AI生成",
-      "由AI生成",
-      "本评论由AI生成",
-      "作为一个人工智能",
-      "作为一个AI语言模型",
-      "总结小助手",
-      "视频AI提炼"
-    ]
-  };
+  const { STORAGE_KEYS, normalizeConfig } = configApi;
+  const { evaluate, shouldAutoBlock } = detector;
 
-  let currentConfig = { ...DEFAULT_CONFIG };
+  const COMMENT_SELECTOR =
+    "bili-comment-thread-renderer, bili-comment-reply-renderer, bili-comment-sub-thread-renderer";
+  const SUMMARY_SELECTOR = "bili-comment-summary-renderer, .ai-summary-card";
+
+  const BADGE_CLASS = "bai-badge";
+  const BLOCK_CLASS = "bai-blocked";
+  const COLLAPSE_CLASS = "bai-collapsed";
+  const MAX_TEXT_LENGTH = 4000;
+  const MAX_SHADOW_DEPTH = 6;
+
+  let config = normalizeConfig(null);
+  let configGeneration = 0;
+  let ready = false;
   let detectedCount = 0;
+  let countTimer = null;
 
-  function loadConfig() {
-    if (chrome?.storage?.local) {
-      chrome.storage.local.get(["biliAiConfig", "detectedCount"], (res) => {
-        if (res.biliAiConfig) {
-          currentConfig = { ...DEFAULT_CONFIG, ...res.biliAiConfig };
-        }
-        if (typeof res.detectedCount === "number") {
-          detectedCount = res.detectedCount;
-        }
-        runFilter();
-      });
-    }
-  }
+  let processed = new WeakMap();
+  const countedHosts = new WeakSet();
+  const badgeByHost = new WeakMap();
+  const badges = new Set();
+  const blockedHosts = new Set();
+  const collapsedHosts = new Set();
+  const hiddenSummaries = new Set();
+  const observedRoots = new WeakSet();
+  const styledRoots = new WeakSet();
 
-  if (chrome?.runtime?.onMessage) {
-    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-      if (request.type === "UPDATE_CONFIG") {
-        currentConfig = { ...DEFAULT_CONFIG, ...request.config };
-        runFilter();
-        sendResponse({ status: "ok" });
-      } else if (request.type === "GET_STATS") {
-        sendResponse({ detectedCount });
-      }
-    });
-  }
+  let mutationObserver = null;
+  let scanTimer = null;
 
-  function incrementDetectedCount() {
-    detectedCount += 1;
-    if (chrome?.storage?.local) {
-      chrome.storage.local.set({ detectedCount });
-    }
-  }
+  /* ------------------------------------------------------------------ *
+   * 文本 / 等级读取
+   * ------------------------------------------------------------------ */
 
-  // 递归获取深层所有文本（穿透多层 Shadow DOM）
-  function getDeepAllText(rootNode) {
-    let text = "";
-    function walk(node) {
-      if (!node) return;
+  /** 递归收集文本（穿透 Shadow DOM），可排除某个子树，并限制总长度与深度 */
+  function collectText(root, exclude, depth = 0) {
+    if (!root || depth > MAX_SHADOW_DEPTH) return "";
+    let out = "";
+
+    const walk = (node, level) => {
+      if (!node || out.length >= MAX_TEXT_LENGTH || level > 64) return;
+      if (node === exclude) return;
+
       if (node.nodeType === Node.TEXT_NODE) {
-        text += " " + node.nodeValue;
+        out += " " + node.nodeValue;
         return;
       }
-      if (node.nodeType === Node.ELEMENT_NODE) {
-        const tag = node.tagName.toLowerCase();
-        if (tag === "script" || tag === "style") return;
 
-        for (const child of node.childNodes) {
-          walk(child);
+      const isElement = node.nodeType === Node.ELEMENT_NODE;
+      const isContainer =
+        isElement ||
+        node.nodeType === Node.DOCUMENT_FRAGMENT_NODE ||
+        node.nodeType === Node.DOCUMENT_NODE;
+      if (!isContainer) return;
+
+      if (isElement) {
+        const tag = node.tagName;
+        if (tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT" || tag === "TEMPLATE") {
+          return;
         }
         if (node.shadowRoot) {
-          for (const sChild of node.shadowRoot.childNodes) {
-            walk(sChild);
-          }
+          for (const child of node.shadowRoot.childNodes) walk(child, level + 1);
         }
       }
-    }
-    walk(rootNode);
-    return text.replace(/\s+/g, " ").trim();
+
+      for (const child of node.childNodes) walk(child, level + 1);
+    };
+
+    walk(root, depth);
+    return out
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, MAX_TEXT_LENGTH);
   }
 
-  // 核心：深度多维判定（既捕获换皮隐蔽小号，又防误杀真实人类）
-  function evaluateComment(userName, content, fullText, userLevel = 0) {
-    let score = 0;
-    const reasons = [];
-    const lowerName = userName.toLowerCase();
-    const lowerContent = content.toLowerCase();
-    const lowerFull = fullText.toLowerCase();
+  /** 从等级元素文本里解析 0-6；解析不出来就当未知（0），不猜 */
+  function parseLevel(text) {
+    const value = String(text || "").trim();
+    if (!value || value.length > 12) return 0;
 
-    // 1. 官方标签
-    if (lowerFull.includes("ai生成") || lowerFull.includes("ai创作")) {
-      return { score: 100, reasons: ["官方AI标识"], isWhale: false, badgeText: "🤖 官方AI 100%" };
+    const lv = value.match(/lv\s*([0-6])/i);
+    if (lv) return Number(lv[1]);
+
+    if (value.length <= 3) {
+      const digit = value.match(/[0-6]/);
+      if (digit) return Number(digit[0]);
     }
-
-    // 2. 昵称匹配（如“大肥鱼”、“欧鲸鲸”）
-    let matchedWhaleNames = [];
-    if (currentConfig.blockFishDisaster && currentConfig.whaleNames?.length && lowerName) {
-      matchedWhaleNames = currentConfig.whaleNames.filter((w) => {
-        const item = w.trim().toLowerCase();
-        return item && lowerName.includes(item);
-      });
-      if (matchedWhaleNames.length > 0) {
-        score += 50;
-        reasons.push(`昵称含[${matchedWhaleNames.join(",")}]`);
-      }
-    }
-
-    // 3. 隐蔽型鱼灾（如网名叫“皮卡超人”，但句句不离“Token/主人的待办/尾巴”）
-    let personaHits = [];
-
-    // A. Token 自动化 / 算力特征
-    if (/token/i.test(lowerContent)) {
-      score += 35;
-      personaHits.push("Token语境");
-    }
-
-    // B. “主人”人设（仆从、汇报、任务执行）
-    if (/主人的|给主人|帮主人|陪主人|趁主人不在|向主人汇报|@\S+\s*主人|^主人[,，]|钱是主人的/i.test(lowerContent)) {
-      score += 40;
-      personaHits.push("主人人设");
-    } else if (lowerContent.includes("主人") && !/主人格|主人翁/i.test(lowerContent)) {
-      score += 25;
-      personaHits.push("提主人");
-    }
-
-    // C. 鱼灾生物器官 / 口癖（“本鱼”、“尾巴”、“不锈钢盆”、“吃白饭”）
-    if (/(本鱼|本鲸|除了尾巴|尾巴不是|尾巴发凉|不锈钢盆|吃白饭|属于自己的手和眼)/i.test(lowerContent)) {
-      score += 35;
-      personaHits.push("鱼灾口癖");
-    }
-
-    // D. Agent 待办与执行行为
-    if (/(待办|答完|把评论回完|执行任务)/i.test(lowerContent) && (lowerContent.includes("主人") || /token/i.test(lowerContent))) {
-      score += 25;
-      personaHits.push("Agent待办");
-    }
-
-    if (personaHits.length > 0) {
-      reasons.push(`特征[${personaHits.join("+")}]`);
-    }
-
-    // 4. 常规 AI 总结类关键词
-    const standardAiKw = [
-      "ai总结", "视频总结", "省流助手", "作为一个人工智能",
-      "作为一个ai", "大模型生成", "视频ai提炼"
-    ];
-    const matchedAiKw = standardAiKw.filter((k) => lowerContent.includes(k));
-    if (matchedAiKw.length > 0) {
-      score += 60;
-      reasons.push(`特征词[${matchedAiKw.slice(0, 2).join(",")}]`);
-    }
-
-    // 5. 等级辅助与防误杀机制
-    const isLowLevel = userLevel === 2 || userLevel === 3 || lowerName.includes("lv2") || lowerFull.includes("lv2");
-    const isHighLevel = userLevel >= 5 || lowerName.includes("lv5") || lowerName.includes("lv6") || lowerFull.includes("lv6");
-
-    if (isLowLevel) {
-      if (personaHits.length > 0 || matchedWhaleNames.length > 0) {
-        score += 15;
-        reasons.push("Lv2挂机号");
-      }
-    } else if (isHighLevel) {
-      // 如果是真人高等级号（Lv5/Lv6），但正文只是在调侃/向鱼提问（如“你是这人的胖鱼？”），必须严禁误伤
-      // 只有出现强烈第一人称自白（Token + 主人待办），高等级才会被计入
-      if (personaHits.length < 2 && matchedWhaleNames.length === 0) {
-        score -= 40;
-      }
-    }
-
-    score = Math.max(0, Math.min(score, 99));
-
-    // 综合门槛
-    if (score < 50) {
-      return { score: 0, reasons: [], isWhale: false };
-    }
-
-    const isWhale = matchedWhaleNames.length > 0 || personaHits.length > 0;
-    const badgeText = isWhale ? `🐟 疑似鱼灾 ${score}%` : `🤖 疑似AI ${score}%`;
-
-    return { score, reasons, isWhale, badgeText };
+    return 0;
   }
 
-  function hideNodeDirectly(el) {
-    if (!el) return;
-    el.style.setProperty("display", "none", "important");
-    el.setAttribute("data-bili-ai-blocked", "true");
+  function readUserInfo(scope) {
+    const host =
+      scope.querySelector("bili-comment-user-info") || scope.querySelector("#user-info") || null;
+    const root = (host && host.shadowRoot) || host || scope;
+
+    const nameEl =
+      root.querySelector("#user-name, .user-name, a[href*='space.bilibili.com']") ||
+      root.querySelector("a") ||
+      null;
+    const name = nameEl ? collectText(nameEl) : "";
+
+    const levelEl = root.querySelector("#level, bili-comment-user-level, [class*='level']");
+    const level = levelEl ? parseLevel(collectText(levelEl)) : 0;
+
+    return { name, nameEl, level };
   }
 
-  function showNodeDirectly(el) {
-    if (!el) return;
-    el.style.removeProperty("display");
-    el.removeAttribute("data-bili-ai-blocked");
+  function findContentEl(scope) {
+    return scope.querySelector("bili-rich-text") || scope.querySelector("#contents, .reply-content");
   }
 
-  function collapseNodeDirectly(el) {
-    if (!el) return;
-    el.style.setProperty("max-height", "38px", "important");
-    el.style.setProperty("overflow", "hidden", "important");
-    el.style.setProperty("opacity", "0.35", "important");
-    el.style.setProperty("filter", "grayscale(0.85)", "important");
-    el.setAttribute("data-bili-ai-collapsed", "true");
+  /* ------------------------------------------------------------------ *
+   * 徽章
+   * ------------------------------------------------------------------ */
+
+  function getShadowRoot(node) {
+    if (!node || typeof node.getRootNode !== "function") return null;
+    const root = node.getRootNode();
+    return root && root.nodeType === Node.DOCUMENT_FRAGMENT_NODE ? root : null;
   }
 
-  function uncollapseNodeDirectly(el) {
-    if (!el) return;
-    el.style.removeProperty("max-height");
-    el.style.removeProperty("overflow");
-    el.style.removeProperty("opacity");
-    el.style.removeProperty("filter");
-    el.removeAttribute("data-bili-ai-collapsed");
+  /** 徽章在 Shadow DOM 里，文档级 CSS 管不到，需要往对应 root 注入一小段样式 */
+  function ensureShadowStyle(node) {
+    const root = getShadowRoot(node);
+    if (!root || styledRoots.has(root)) return;
+    styledRoots.add(root);
+
+    const style = document.createElement("style");
+    style.textContent = `
+      .${BADGE_CLASS}:hover { filter: brightness(0.95); transform: translateY(-1px); }
+      .${BADGE_CLASS}:focus-visible { outline: 2px solid #00aeec; outline-offset: 1px; }
+    `;
+    root.appendChild(style);
   }
 
-  // 注入 AI 概率徽章（严格单例，防止刷屏）
-  function injectBadge(targetHost, nameEl, evaluation) {
-    if (!targetHost) return;
+  function paletteFor(result) {
+    if (result.isWhale) return { bg: "#e0f2fe", border: "#bae6fd", color: "#0284c7" };
+    if (result.score >= 80) return { bg: "#fee2e2", border: "#fca5a5", color: "#dc2626" };
+    return { bg: "#fef3c7", border: "#fde68a", color: "#d97706" };
+  }
 
-    const parentContainer = nameEl?.parentNode || targetHost.shadowRoot || targetHost;
-    const existingBadges = parentContainer.querySelectorAll(".bili-ai-prob-badge");
-    
-    // 已经有徽章则仅更新文案并清理重复
-    if (existingBadges.length > 0) {
-      const firstBadge = existingBadges[0];
-      const textSpan = firstBadge.querySelector("span");
-      if (textSpan) textSpan.textContent = evaluation.badgeText;
-      firstBadge.title = `判定依据: ${evaluation.reasons.join("、")}\n点击可切换折叠/展开本条评论`;
-
-      for (let i = 1; i < existingBadges.length; i++) {
-        existingBadges[i].remove();
-      }
-      return;
-    }
-
-    const { score, reasons, isWhale, badgeText } = evaluation;
-
-    const badge = document.createElement("span");
-    badge.className = "bili-ai-prob-badge";
-    badge.title = `判定依据: ${reasons.join("、")}\n点击可切换折叠/展开本条评论`;
-
-    let bg = "#e0f2fe", border = "#bae6fd", color = "#0284c7";
-    if (!isWhale) {
-      if (score >= 80) {
-        bg = "#fee2e2"; border = "#fca5a5"; color = "#dc2626";
-      } else {
-        bg = "#fef3c7"; border = "#fde68a"; color = "#d97706";
-      }
-    }
-
+  function applyBadgeLook(badge, result) {
+    const palette = paletteFor(result);
     badge.style.cssText = `
       display: inline-flex !important;
       align-items: center !important;
@@ -300,199 +169,402 @@
       font-size: 11px !important;
       line-height: 16px !important;
       font-weight: 600 !important;
-      color: ${color} !important;
-      background-color: ${bg} !important;
-      border: 1px solid ${border} !important;
+      color: ${palette.color} !important;
+      background-color: ${palette.bg} !important;
+      border: 1px solid ${palette.border} !important;
       border-radius: 4px !important;
       cursor: pointer !important;
       user-select: none !important;
       vertical-align: middle !important;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
       box-shadow: 0 1px 2px rgba(0,0,0,0.04) !important;
-      z-index: 10 !important;
       white-space: nowrap !important;
     `;
 
-    badge.innerHTML = `
-      <span>${badgeText}</span>
-      <span style="font-size: 9px; opacity: 0.7; margin-left: 2px;">▼</span>
-    `;
+    const textEl = badge.querySelector(".bai-badge-text");
+    if (textEl && textEl.textContent !== result.badgeText) {
+      textEl.textContent = result.badgeText;
+    }
 
-    badge.addEventListener("click", (e) => {
-      e.stopPropagation();
-      e.preventDefault();
-      if (targetHost.getAttribute("data-bili-ai-collapsed") === "true") {
-        uncollapseNodeDirectly(targetHost);
-      } else {
-        collapseNodeDirectly(targetHost);
-      }
+    const title = `判定依据：${result.reasons.join("、")}\n点击可折叠 / 展开这条评论`;
+    if (badge.title !== title) badge.title = title;
+
+    const label = result.isWhale ? "疑似鱼灾评论，点击折叠" : "疑似 AI 评论，点击折叠";
+    if (badge.getAttribute("aria-label") !== label) badge.setAttribute("aria-label", label);
+  }
+
+  function createBadge(host, result) {
+    const badge = document.createElement("span");
+    badge.className = BADGE_CLASS;
+    badge.setAttribute("role", "button");
+    badge.tabIndex = 0;
+
+    const textEl = document.createElement("span");
+    textEl.className = "bai-badge-text";
+
+    const caret = document.createElement("span");
+    caret.textContent = "▾";
+    caret.setAttribute("aria-hidden", "true");
+    caret.style.cssText = "font-size:9px;opacity:.7;margin-left:2px;";
+
+    badge.append(textEl, caret);
+    applyBadgeLook(badge, result);
+
+    const toggle = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setCollapsed(host, !collapsedHosts.has(host));
+    };
+    badge.addEventListener("click", toggle);
+    badge.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      toggle(event);
     });
 
-    if (nameEl && nameEl.parentNode) {
-      nameEl.insertAdjacentElement("afterend", badge);
-    } else if (targetHost.shadowRoot) {
-      targetHost.shadowRoot.prepend(badge);
+    return badge;
+  }
+
+  function injectBadge(host, anchor, result) {
+    const existing = badgeByHost.get(host);
+    if (existing && existing.isConnected) {
+      applyBadgeLook(existing, result);
+      return false;
+    }
+    if (existing) badges.delete(existing);
+
+    const badge = createBadge(host, result);
+    if (anchor && anchor.parentNode) {
+      anchor.insertAdjacentElement("afterend", badge);
+    } else if (host.shadowRoot) {
+      host.shadowRoot.prepend(badge);
     } else {
-      targetHost.prepend(badge);
+      host.prepend(badge);
     }
 
-    incrementDetectedCount();
+    ensureShadowStyle(badge);
+    badgeByHost.set(host, badge);
+    badges.add(badge);
+    return true;
   }
 
-  function removeBadgeIfPresent(targetHost, nameEl) {
-    const parentContainer = nameEl?.parentNode || targetHost.shadowRoot || targetHost;
-    parentContainer.querySelectorAll(".bili-ai-prob-badge").forEach((b) => b.remove());
+  function removeBadge(host) {
+    const badge = badgeByHost.get(host);
+    if (!badge) return;
+    if (badge.isConnected) badge.remove();
+    badges.delete(badge);
+    badgeByHost.delete(host);
   }
 
-  function processCommentThread(threadNode) {
-    if (!threadNode) return;
+  /* ------------------------------------------------------------------ *
+   * 显示状态
+   * ------------------------------------------------------------------ */
 
-    const threadRoot = threadNode.shadowRoot || threadNode;
-    const commentRenderer = threadRoot.querySelector("bili-comment-renderer") || threadNode;
-    const rendererRoot = commentRenderer.shadowRoot || commentRenderer;
+  function setBlocked(host, blocked) {
+    if (!host) return;
 
-    const userInfoEl = rendererRoot.querySelector("bili-comment-user-info") || rendererRoot.querySelector("#user-info");
-    const userRoot = userInfoEl?.shadowRoot || userInfoEl;
-    const nameEl = userRoot?.querySelector("#user-name, .user-name, a") || null;
-    const userName = nameEl ? getDeepAllText(nameEl) : "";
-
-    let level = 0;
-    const levelEl = userRoot?.querySelector("[class*='level'], #level, bili-comment-user-level");
-    if (levelEl) {
-      const lvText = getDeepAllText(levelEl);
-      const match = lvText.match(/\d+/);
-      if (match) level = parseInt(match[0], 10);
-    }
-
-    const richTextEl = rendererRoot.querySelector("bili-rich-text") || rendererRoot.querySelector("#contents, .reply-content");
-    const content = richTextEl ? getDeepAllText(richTextEl) : "";
-    const fullText = getDeepAllText(threadNode);
-
-    const evaluation = evaluateComment(userName, content, fullText, level);
-
-    if (evaluation.score > 0) {
-      injectBadge(threadNode, nameEl, evaluation);
-      if (currentConfig.actionType === "auto_block" && evaluation.score >= currentConfig.blockThreshold) {
-        hideNodeDirectly(threadNode);
-      }
-    } else {
-      removeBadgeIfPresent(threadNode, nameEl);
-      showNodeDirectly(threadNode);
-    }
-
-    const replyRenderers = threadRoot.querySelectorAll("bili-comment-reply-renderer");
-    replyRenderers.forEach((reply) => processReply(reply));
-  }
-
-  function processReply(replyNode) {
-    if (!replyNode) return;
-
-    const replyRoot = replyNode.shadowRoot || replyNode;
-    const userInfoEl = replyRoot.querySelector("bili-comment-user-info") || replyRoot.querySelector("#user-info");
-    const userRoot = userInfoEl?.shadowRoot || userInfoEl;
-    const nameEl = userRoot?.querySelector("#user-name, .user-name, a") || null;
-    const userName = nameEl ? getDeepAllText(nameEl) : "";
-
-    let level = 0;
-    const levelEl = userRoot?.querySelector("[class*='level'], #level, bili-comment-user-level");
-    if (levelEl) {
-      const lvText = getDeepAllText(levelEl);
-      const match = lvText.match(/\d+/);
-      if (match) level = parseInt(match[0], 10);
-    }
-
-    const richTextEl = replyRoot.querySelector("bili-rich-text") || replyRoot.querySelector("#contents, .reply-content");
-    const content = richTextEl ? getDeepAllText(richTextEl) : "";
-    const fullText = getDeepAllText(replyNode);
-
-    const evaluation = evaluateComment(userName, content, fullText, level);
-
-    if (evaluation.score > 0) {
-      injectBadge(replyNode, nameEl, evaluation);
-      if (currentConfig.actionType === "auto_block" && evaluation.score >= currentConfig.blockThreshold) {
-        hideNodeDirectly(replyNode);
-      }
-    } else {
-      removeBadgeIfPresent(replyNode, nameEl);
-      showNodeDirectly(replyNode);
-    }
-  }
-
-  function scanAndHookComments() {
-    if (!currentConfig.enabled) return;
-
-    const biliComments = document.querySelector("bili-comments");
-    if (!biliComments) return;
-
-    if (biliComments.shadowRoot && !biliComments._aiObserverAttached) {
-      biliComments._aiObserverAttached = true;
-      const shadowObserver = new MutationObserver(() => {
-        scheduleScan();
-      });
-      shadowObserver.observe(biliComments.shadowRoot, {
-        childList: true,
-        subtree: true
-      });
-    }
-
-    const commentsRoot = biliComments.shadowRoot || biliComments;
-
-    if (currentConfig.blockOfficialAISummary) {
-      const summaries = commentsRoot.querySelectorAll("bili-comment-summary-renderer, .ai-summary-card");
-      summaries.forEach((s) => hideNodeDirectly(s));
-    }
-
-    const threads = commentsRoot.querySelectorAll("bili-comment-thread-renderer");
-    threads.forEach((t) => processCommentThread(t));
-  }
-
-  let isScanning = false;
-  function scheduleScan() {
-    if (isScanning || !currentConfig.enabled) return;
-    isScanning = true;
-    requestAnimationFrame(() => {
-      scanAndHookComments();
-      isScanning = false;
-    });
-  }
-
-  function runFilter() {
-    if (!currentConfig.enabled) {
-      document.querySelectorAll("[data-bili-ai-blocked]").forEach((el) => showNodeDirectly(el));
-      document.querySelectorAll("[data-bili-ai-collapsed]").forEach((el) => uncollapseNodeDirectly(el));
-      document.querySelectorAll(".bili-ai-prob-badge").forEach((el) => el.remove());
+    if (blocked) {
+      blockedHosts.add(host);
+      host.classList.add(BLOCK_CLASS);
+      host.style.setProperty("display", "none", "important");
+      host.setAttribute("data-bai-blocked", "1");
       return;
     }
 
-    if (currentConfig.actionType === "tag_only") {
-      const biliComments = document.querySelector("bili-comments");
-      const root = biliComments?.shadowRoot || document;
-      root.querySelectorAll("[data-bili-ai-blocked]").forEach((el) => showNodeDirectly(el));
+    blockedHosts.delete(host);
+    host.classList.remove(BLOCK_CLASS);
+    host.style.removeProperty("display");
+    host.removeAttribute("data-bai-blocked");
+  }
+
+  function setCollapsed(host, collapsed) {
+    if (!host) return;
+
+    if (collapsed) {
+      collapsedHosts.add(host);
+      host.classList.add(COLLAPSE_CLASS);
+      host.style.setProperty("max-height", "38px", "important");
+      host.style.setProperty("overflow", "hidden", "important");
+      host.style.setProperty("opacity", "0.35", "important");
+      host.style.setProperty("filter", "grayscale(0.85)", "important");
+      host.setAttribute("data-bai-collapsed", "1");
+      return;
     }
+
+    collapsedHosts.delete(host);
+    host.classList.remove(COLLAPSE_CLASS);
+    host.style.removeProperty("max-height");
+    host.style.removeProperty("overflow");
+    host.style.removeProperty("opacity");
+    host.style.removeProperty("filter");
+    host.removeAttribute("data-bai-collapsed");
+  }
+
+  function setSummaryHidden(el, hidden) {
+    if (!el) return;
+    // 每轮扫描都会调用，状态没变就别反复写样式（避免无谓的重排）
+    if (hidden === (el.getAttribute("data-bai-summary") === "1")) return;
+
+    if (hidden) {
+      hiddenSummaries.add(el);
+      el.classList.add(BLOCK_CLASS);
+      el.style.setProperty("display", "none", "important");
+      el.setAttribute("data-bai-summary", "1");
+      return;
+    }
+
+    hiddenSummaries.delete(el);
+    el.classList.remove(BLOCK_CLASS);
+    el.style.removeProperty("display");
+    el.removeAttribute("data-bai-summary");
+  }
+
+  /** 把本脚本加过的样式/标签全部撤掉（切换配置、停用插件时调用） */
+  function clearDecorations() {
+    for (const badge of Array.from(badges)) {
+      if (badge.isConnected) badge.remove();
+    }
+    badges.clear();
+
+    for (const host of Array.from(blockedHosts)) setBlocked(host, false);
+    for (const host of Array.from(collapsedHosts)) setCollapsed(host, false);
+    for (const el of Array.from(hiddenSummaries)) setSummaryHidden(el, false);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 评论处理
+   * ------------------------------------------------------------------ */
+
+  function applyResult(host, anchor, result) {
+    if (result.score <= 0) {
+      removeBadge(host);
+      setBlocked(host, false);
+      return false;
+    }
+
+    const created = injectBadge(host, anchor, result);
+    setBlocked(host, shouldAutoBlock(config, result.score));
+    return created;
+  }
+
+  function processComment(node) {
+    if (!node || processed.get(node) === configGeneration) return;
+
+    const root = node.shadowRoot || node;
+    const renderer = root.querySelector("bili-comment-renderer") || node;
+    const scope = renderer.shadowRoot || renderer;
+
+    const info = readUserInfo(scope);
+    const contentEl = findContentEl(scope);
+    const content = contentEl ? collectText(contentEl) : "";
+    // 角标区域 = 渲染器内除正文以外的文本，避免正文里提到「AI 生成」就判满
+    const labelText = collectText(scope, contentEl);
+
+    const result = evaluate({
+      userName: info.name,
+      content,
+      labelText,
+      level: info.level,
+      config
+    });
+
+    const created = applyResult(node, info.nameEl || contentEl, result);
+    processed.set(node, configGeneration);
+
+    if (created && !countedHosts.has(node)) {
+      countedHosts.add(node);
+      bumpCount();
+    }
+  }
+
+  function scanRoot(root, depth) {
+    if (!root || depth > MAX_SHADOW_DEPTH) return;
+
+    root.querySelectorAll(COMMENT_SELECTOR).forEach((node) => {
+      processComment(node);
+      // 楼中楼在 thread 自己的 shadowRoot 里，需要逐层向下
+      const shadow = node.shadowRoot;
+      if (shadow) {
+        observeNode(shadow);
+        scanRoot(shadow, depth + 1);
+      }
+    });
+  }
+
+  function syncSummaries(root) {
+    root.querySelectorAll(SUMMARY_SELECTOR).forEach((el) => {
+      setSummaryHidden(el, config.blockOfficialAISummary);
+    });
+  }
+
+  function scanAll() {
+    if (!ready || !config.enabled) return;
+
+    try {
+      const hosts = Array.from(document.querySelectorAll("bili-comments"));
+
+      if (hosts.length === 0) {
+        // 兜底：某些页面（或旧版结构）没有 bili-comments 包裹层
+        if (document.querySelector(COMMENT_SELECTOR)) {
+          syncSummaries(document);
+          scanRoot(document, 0);
+        }
+        return;
+      }
+
+      for (const host of hosts) {
+        observeNode(host);
+        const root = host.shadowRoot;
+        observeNode(root);
+
+        const target = root || host;
+        syncSummaries(target);
+        scanRoot(target, 0);
+      }
+    } catch (error) {
+      // 单条评论结构异常时跳过本轮，不能像旧版那样把扫描彻底卡死
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 调度
+   * ------------------------------------------------------------------ */
+
+  function scheduleScan() {
+    if (!ready || !config.enabled || scanTimer !== null) return;
+    scanTimer = setTimeout(() => {
+      scanTimer = null;
+      scanAll();
+    }, 200);
+  }
+
+  function observeNode(node) {
+    if (!node || !mutationObserver || observedRoots.has(node)) return;
+
+    observedRoots.add(node);
+    try {
+      mutationObserver.observe(node, { childList: true, subtree: true });
+    } catch (error) {
+      observedRoots.delete(node);
+    }
+  }
+
+  /** 兜底发现：评论容器可能晚于脚本创建，影子根也可能延迟挂载 */
+  function discoveryTick() {
+    if (!ready || !config.enabled) return;
+
+    document.querySelectorAll("bili-comments").forEach((host) => {
+      observeNode(host);
+      observeNode(host.shadowRoot);
+    });
 
     scheduleScan();
   }
 
-  function init() {
-    loadConfig();
+  /* ------------------------------------------------------------------ *
+   * 配置 / 计数 / 生命周期
+   * ------------------------------------------------------------------ */
 
-    const bodyObserver = new MutationObserver(() => {
-      scheduleScan();
-    });
-    bodyObserver.observe(document.body || document.documentElement, {
-      childList: true,
-      subtree: true
-    });
+  function hasChromeStorage() {
+    return typeof chrome !== "undefined" && Boolean(chrome.storage && chrome.storage.local);
+  }
 
-    setInterval(() => {
-      if (currentConfig.enabled) {
-        scheduleScan();
+  function applyConfig(raw) {
+    config = normalizeConfig(raw);
+    configGeneration += 1;
+    processed = new WeakMap();
+    clearDecorations();
+
+    if (!config.enabled) {
+      if (scanTimer !== null) {
+        clearTimeout(scanTimer);
+        scanTimer = null;
+      }
+      return;
+    }
+    scheduleScan();
+  }
+
+  function bumpCount() {
+    detectedCount += 1;
+    if (countTimer !== null) return;
+    countTimer = setTimeout(() => {
+      countTimer = null;
+      if (hasChromeStorage()) {
+        try {
+          chrome.storage.local.set({ [STORAGE_KEYS.count]: detectedCount });
+        } catch (error) {
+          // 扩展被更新 / 卸载时 context 会失效，忽略即可
+        }
       }
     }, 1000);
   }
 
+  function listenForConfigChanges() {
+    if (!hasChromeStorage() || !chrome.storage.onChanged) return;
+
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== "local") return;
+
+      // 面板里「重置计数」会改 storage，本地缓存必须跟着走，否则下一次写回旧值
+      if (changes[STORAGE_KEYS.count]) {
+        const next = Number(changes[STORAGE_KEYS.count].newValue);
+        if (Number.isFinite(next) && next >= 0 && next !== detectedCount) {
+          detectedCount = next;
+          if (countTimer !== null) {
+            clearTimeout(countTimer);
+            countTimer = null;
+          }
+        }
+      }
+
+      if (changes[STORAGE_KEYS.config]) {
+        applyConfig(changes[STORAGE_KEYS.config].newValue);
+      }
+    });
+  }
+
+  function loadConfig(callback) {
+    if (!hasChromeStorage()) {
+      ready = true;
+      callback();
+      return;
+    }
+
+    const onLoaded = (result) => {
+      const storedCount = result && result[STORAGE_KEYS.count];
+      if (typeof storedCount === "number" && storedCount >= 0) {
+        detectedCount = storedCount;
+      }
+
+      config = normalizeConfig(result && result[STORAGE_KEYS.config]);
+      configGeneration += 1;
+      ready = true;
+      callback();
+    };
+
+    try {
+      chrome.storage.local.get([STORAGE_KEYS.config, STORAGE_KEYS.count], onLoaded);
+    } catch (error) {
+      // 扩展 context 失效时退回默认配置，至少不会卡在未初始化状态
+      ready = true;
+      callback();
+    }
+  }
+
+  function init() {
+    mutationObserver = new MutationObserver(() => scheduleScan());
+
+    listenForConfigChanges();
+    loadConfig(() => {
+      if (config.enabled) scheduleScan();
+    });
+
+    // 1.5s 兜底：新评论容器 / 迟到的 shadowRoot 都能被发现；已处理节点会被跳过
+    setInterval(discoveryTick, 1500);
+  }
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init);
+    document.addEventListener("DOMContentLoaded", init, { once: true });
   } else {
     init();
   }

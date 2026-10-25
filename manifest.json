@@ -2,24 +2,40 @@
   "manifest_version": 3,
   "name": "B站 鱼灾/AI 评论雷达",
   "version": "1.1.0",
-  "description": "智能识别与过滤 Bilibili 评论区大肥鱼/鲸鲸等 AI 挂机刷屏评论，支持概率打标与一键屏蔽",
+  "description": "识别并过滤 Bilibili 评论区的大肥鱼/鲸鲸等 AI 挂机评论，支持概率打标与一键折叠",
+  "homepage_url": "https://github.com/Mrgaols/bili-ai-comment-filter",
   "permissions": [
     "storage"
   ],
-  "host_permissions": [
-    "*://*.bilibili.com/*"
-  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "B站 鱼灾/AI 评论设置"
+    "default_title": "B站 鱼灾/AI 评论设置",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   },
   "content_scripts": [
     {
       "matches": [
         "*://*.bilibili.com/*"
       ],
-      "js": ["content.js"],
-      "css": ["content.css"],
+      "js": [
+        "config.js",
+        "detector.js",
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
       "run_at": "document_idle"
     }
   ]

@@ -1,141 +1,179 @@
-const DEFAULT_CONFIG = {
-  enabled: true,
-  actionType: "tag_only",
-  blockThreshold: 70,
-  blockFishDisaster: true,
-  blockOfficialAISummary: false,
-  blockByKeywords: true,
-  whaleNames: [
-    "大肥鱼",
-    "鲸鲸",
-    "小飞鲸",
-    "小肥鱼",
-    "鲸鱼娘",
-    "欧鲸",
-    "肥鱼",
-    "机器鲸",
-    "大白鱼"
-  ],
-  keywords: [
-    "本鱼",
-    "本鲸",
-    "帮主人",
-    "给主人",
-    "陪主人",
-    "趁主人不在",
-    "属于自己的手和眼",
-    "自己的手和眼",
-    "吃白饭",
-    "讨要token",
-    "要token",
-    "赚token",
-    "赛博宠物",
-    "向主人汇报",
-    "尾巴发凉",
-    "记小本本上",
-    "AI总结",
-    "AI 总结",
-    "视频总结",
-    "省流助手",
-    "AI生成",
-    "由AI生成",
-    "本评论由AI生成",
-    "作为一个人工智能",
-    "作为一个AI语言模型",
-    "总结小助手",
-    "视频AI提炼"
-  ]
-};
+(() => {
+  "use strict";
 
-document.addEventListener("DOMContentLoaded", () => {
-  const modeTagEl = document.getElementById("mode-tag");
-  const modeBlockEl = document.getElementById("mode-block");
-  const thresholdRangeEl = document.getElementById("threshold-range");
-  const thresholdValEl = document.getElementById("threshold-val");
-  const blockFishEl = document.getElementById("block-fish");
-  const blockOfficialEl = document.getElementById("block-official");
-  const blockKeywordsEl = document.getElementById("block-keywords");
-  const whaleNamesEl = document.getElementById("whale-names");
-  const keywordListEl = document.getElementById("keyword-list");
-  const blockCounterEl = document.getElementById("block-counter");
-  const saveBtn = document.getElementById("save-btn");
-  const resetBtn = document.getElementById("reset-btn");
+  const configApi = globalThis.BiliAiConfig;
+  if (!configApi) return;
 
-  thresholdRangeEl.addEventListener("input", (e) => {
-    thresholdValEl.textContent = `≥${e.target.value}%`;
-  });
+  const { DEFAULT_CONFIG, STORAGE_KEYS, THRESHOLD_MIN, THRESHOLD_MAX, normalizeConfig } = configApi;
 
-  chrome.storage.local.get(["biliAiConfig", "detectedCount"], (res) => {
-    const config = res.biliAiConfig || DEFAULT_CONFIG;
+  const els = {
+    enabled: document.getElementById("enabled"),
+    counter: document.getElementById("block-counter"),
+    resetCount: document.getElementById("reset-count"),
+    modeTag: document.getElementById("mode-tag"),
+    modeBlock: document.getElementById("mode-block"),
+    thresholdBox: document.getElementById("threshold-box"),
+    thresholdRange: document.getElementById("threshold-range"),
+    thresholdVal: document.getElementById("threshold-val"),
+    blockFish: document.getElementById("block-fish"),
+    blockOfficial: document.getElementById("block-official"),
+    blockKeywords: document.getElementById("block-keywords"),
+    whaleNames: document.getElementById("whale-names"),
+    keywordList: document.getElementById("keyword-list"),
+    saveBtn: document.getElementById("save-btn"),
+    resetBtn: document.getElementById("reset-btn")
+  };
 
-    if (config.actionType === "auto_block") {
-      modeBlockEl.checked = true;
-    } else {
-      modeTagEl.checked = true;
+  let toastTimer = null;
+
+  function showToast(text) {
+    let toast = document.querySelector(".toast");
+    if (!toast) {
+      toast = document.createElement("div");
+      toast.className = "toast";
+      toast.setAttribute("role", "status");
+      document.body.appendChild(toast);
     }
+    toast.textContent = text;
+    toast.classList.add("visible");
 
-    const threshold = config.blockThreshold || 70;
-    thresholdRangeEl.value = threshold;
-    thresholdValEl.textContent = `≥${threshold}%`;
+    if (toastTimer !== null) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toastTimer = null;
+      toast.classList.remove("visible");
+    }, 1400);
+  }
 
-    blockFishEl.checked = config.blockFishDisaster ?? true;
-    blockOfficialEl.checked = config.blockOfficialAISummary ?? false;
-    blockKeywordsEl.checked = config.blockByKeywords ?? true;
+  function parseList(value) {
+    return String(value || "")
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+  }
 
-    whaleNamesEl.value = (config.whaleNames || DEFAULT_CONFIG.whaleNames).join("\n");
-    keywordListEl.value = (config.keywords || DEFAULT_CONFIG.keywords).join("\n");
+  function updateThresholdLabel(value) {
+    els.thresholdVal.textContent = `≥${value}%`;
+  }
 
-    const count = res.detectedCount || 0;
-    blockCounterEl.textContent = `已识别 ${count} 条`;
+  /** 让表单的可用状态跟勾选/模式联动，避免「填了但不生效」的误解 */
+  function syncFormState() {
+    const isTagOnly = els.modeTag.checked;
+    els.thresholdBox.classList.toggle("disabled", isTagOnly);
+    els.thresholdRange.disabled = isTagOnly;
+
+    els.whaleNames.disabled = !els.blockFish.checked;
+    els.keywordList.disabled = !els.blockKeywords.checked;
+  }
+
+  function updateCountLabel(count) {
+    els.counter.textContent = `已识别 ${Number(count) || 0} 条`;
+  }
+
+  function fillForm(config) {
+    const normalized = normalizeConfig(config);
+
+    els.enabled.checked = normalized.enabled;
+    els.modeTag.checked = normalized.actionType !== "auto_block";
+    els.modeBlock.checked = normalized.actionType === "auto_block";
+
+    els.thresholdRange.value = String(normalized.blockThreshold);
+    updateThresholdLabel(normalized.blockThreshold);
+
+    els.blockFish.checked = normalized.blockFishDisaster;
+    els.blockOfficial.checked = normalized.blockOfficialAISummary;
+    els.blockKeywords.checked = normalized.blockByKeywords;
+
+    els.whaleNames.value = normalized.whaleNames.join("\n");
+    els.keywordList.value = normalized.keywords.join("\n");
+
+    syncFormState();
+  }
+
+  function readFormConfig() {
+    return normalizeConfig({
+      enabled: els.enabled.checked,
+      actionType: els.modeBlock.checked ? "auto_block" : "tag_only",
+      blockThreshold: Number(els.thresholdRange.value),
+      blockFishDisaster: els.blockFish.checked,
+      blockOfficialAISummary: els.blockOfficial.checked,
+      blockByKeywords: els.blockKeywords.checked,
+      whaleNames: parseList(els.whaleNames.value),
+      keywords: parseList(els.keywordList.value)
+    });
+  }
+
+  function saveConfig(config, message) {
+    chrome.storage.local.set({ [STORAGE_KEYS.config]: config }, () => {
+      showToast(message || "已应用");
+    });
+  }
+
+  // ---------------- 事件绑定 ----------------
+
+  els.thresholdRange.min = String(THRESHOLD_MIN);
+  els.thresholdRange.max = String(THRESHOLD_MAX);
+
+  els.thresholdRange.addEventListener("input", () => {
+    updateThresholdLabel(els.thresholdRange.value);
   });
 
-  saveBtn.addEventListener("click", () => {
-    const whaleNames = whaleNamesEl.value
-      .split("\n")
-      .map((k) => k.trim())
-      .filter((k) => k.length > 0);
+  els.modeTag.addEventListener("change", syncFormState);
+  els.modeBlock.addEventListener("change", syncFormState);
+  els.blockFish.addEventListener("change", syncFormState);
+  els.blockKeywords.addEventListener("change", syncFormState);
 
-    const keywords = keywordListEl.value
-      .split("\n")
-      .map((k) => k.trim())
-      .filter((k) => k.length > 0);
-
-    const newConfig = {
-      enabled: true,
-      actionType: modeBlockEl.checked ? "auto_block" : "tag_only",
-      blockThreshold: parseInt(thresholdRangeEl.value, 10),
-      blockFishDisaster: blockFishEl.checked,
-      blockOfficialAISummary: blockOfficialEl.checked,
-      blockByKeywords: blockKeywordsEl.checked,
-      whaleNames: whaleNames,
-      keywords: keywords
-    };
-
-    chrome.storage.local.set({ biliAiConfig: newConfig }, () => {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs[0]?.id) {
-          chrome.tabs.sendMessage(tabs[0].id, {
-            type: "UPDATE_CONFIG",
-            config: newConfig
-          }).catch(() => {});
-        }
+  // 总开关即时生效（其余选项点「保存并应用」）
+  els.enabled.addEventListener("change", () => {
+    chrome.storage.local.get([STORAGE_KEYS.config], (result) => {
+      const next = normalizeConfig({
+        ...normalizeConfig(result && result[STORAGE_KEYS.config]),
+        enabled: els.enabled.checked
       });
-
-      saveBtn.textContent = "已应用 ✔";
-      setTimeout(() => {
-        saveBtn.textContent = "保存并应用";
-      }, 1200);
+      saveConfig(next, els.enabled.checked ? "已启用" : "已停用");
     });
   });
 
-  resetBtn.addEventListener("click", () => {
-    modeTagEl.checked = true;
-    thresholdRangeEl.value = DEFAULT_CONFIG.blockThreshold;
-    thresholdValEl.textContent = `≥${DEFAULT_CONFIG.blockThreshold}%`;
-    blockFishEl.checked = DEFAULT_CONFIG.blockFishDisaster;
-    blockOfficialEl.checked = DEFAULT_CONFIG.blockOfficialAISummary;
-    blockKeywordsEl.checked = DEFAULT_CONFIG.blockByKeywords;
-    whaleNamesEl.value = DEFAULT_CONFIG.whaleNames.join("\n");
-    keywordListEl.value = DEFAULT_CONFIG.keywords.join("\n");
+  els.saveBtn.addEventListener("click", () => {
+    saveConfig(readFormConfig());
+    els.saveBtn.textContent = "已应用 ✔";
+    setTimeout(() => {
+      els.saveBtn.textContent = "保存并应用";
+    }, 1200);
   });
-});
+
+  els.resetBtn.addEventListener("click", () => {
+    els.enabled.checked = DEFAULT_CONFIG.enabled;
+    els.modeTag.checked = true;
+    els.modeBlock.checked = false;
+    els.thresholdRange.value = String(DEFAULT_CONFIG.blockThreshold);
+    updateThresholdLabel(DEFAULT_CONFIG.blockThreshold);
+    els.blockFish.checked = DEFAULT_CONFIG.blockFishDisaster;
+    els.blockOfficial.checked = DEFAULT_CONFIG.blockOfficialAISummary;
+    els.blockKeywords.checked = DEFAULT_CONFIG.blockByKeywords;
+    els.whaleNames.value = DEFAULT_CONFIG.whaleNames.join("\n");
+    els.keywordList.value = DEFAULT_CONFIG.keywords.join("\n");
+    syncFormState();
+    showToast("已恢复默认值（尚未保存）");
+  });
+
+  els.resetCount.addEventListener("click", () => {
+    chrome.storage.local.set({ [STORAGE_KEYS.count]: 0 }, () => {
+      updateCountLabel(0);
+      showToast("计数已清零");
+    });
+  });
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") return;
+    if (changes[STORAGE_KEYS.count]) {
+      updateCountLabel(changes[STORAGE_KEYS.count].newValue || 0);
+    }
+  });
+
+  // ---------------- 初始化 ----------------
+
+  chrome.storage.local.get([STORAGE_KEYS.config, STORAGE_KEYS.count], (result) => {
+    fillForm(result && result[STORAGE_KEYS.config]);
+    updateCountLabel(result && result[STORAGE_KEYS.count]);
+  });
+})();
