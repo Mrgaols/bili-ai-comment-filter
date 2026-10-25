@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>B站 鱼灾/AI 评论净化</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <h2>B站 鱼灾/AI 评论雷达</h2>
+      <span class="badge" id="block-counter">已识别 0 条</span>
+    </header>
+
+    <!-- 运行模式切换 -->
+    <div class="section mode-section">
+      <div class="label-title">处理模式：</div>
+      <div class="radio-group">
+        <label class="radio-label">
+          <input type="radio" name="actionType" value="tag_only" id="mode-tag" checked>
+          <span>仅加概率标签 (不自动屏蔽，点击标签可手动折叠)</span>
+        </label>
+        <label class="radio-label">
+          <input type="radio" name="actionType" value="auto_block" id="mode-block">
+          <span>达到阈值自动屏蔽</span>
+        </label>
+      </div>
+
+      <div class="threshold-row" id="threshold-box" style="margin-top: 8px;">
+        <span style="font-size: 12px; color: #61666d;">自动屏蔽阈值：</span>
+        <input type="range" id="threshold-range" min="50" max="95" step="5" value="70">
+        <span id="threshold-val" style="font-size: 12px; font-weight: bold; color: #00aeec;">≥70%</span>
+      </div>
+    </div>
+
+    <!-- 专项功能 -->
+    <div class="section toggle-row highlight-box">
+      <label for="block-fish">🐟 捕捞大肥鱼/鲸鲸 (鱼灾专项)</label>
+      <input type="checkbox" id="block-fish" checked>
+    </div>
+
+    <div class="section toggle-row">
+      <label for="block-keywords">启用话术与特征词过滤</label>
+      <input type="checkbox" id="block-keywords" checked>
+    </div>
+
+    <div class="section toggle-row">
+      <label for="block-official">隐藏评论区置顶 AI 总结</label>
+      <input type="checkbox" id="block-official">
+    </div>
+
+    <div class="section">
+      <label class="label-title" for="whale-names">鱼灾昵称库 (【仅检查名字】，严禁正文，防止误伤讨论):</label>
+      <textarea id="whale-names" rows="2" placeholder="大肥鱼&#10;鲸鲸&#10;小飞鲸&#10;小肥鱼"></textarea>
+    </div>
+
+    <div class="section">
+      <label class="label-title" for="keyword-list">评论人设口癖库 (【仅检查正文】，自称与口癖):</label>
+      <textarea id="keyword-list" rows="3" placeholder="本鱼&#10;帮主人&#10;趁主人不在&#10;属于自己的手和眼"></textarea>
+    </div>
+
+    <div class="actions">
+      <button id="save-btn" class="btn primary">保存并应用</button>
+      <button id="reset-btn" class="btn secondary">重置默认</button>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "B站 鱼灾/AI 评论雷达",
+  "version": "1.1.0",
+  "description": "智能识别与过滤 Bilibili 评论区大肥鱼/鲸鲸等 AI 挂机刷屏评论，支持概率打标与一键屏蔽",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "*://*.bilibili.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "B站 鱼灾/AI 评论设置"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.bilibili.com/*"
+      ],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
