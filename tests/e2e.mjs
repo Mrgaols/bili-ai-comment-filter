@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 /**
- * 可选端到端冒烟测试：在真实的 Chrome 里加载本扩展，打开一个复刻 B 站评论区
- * 结构的页面（含多层 Shadow DOM、楼中楼、置顶 AI 总结），检查：
- *   - 昵称命中 / 正文特征 / 官方 AI 角标是否都打上标签；
- *   - 普通人类评论是否保持干净；
+ * 可选端到端冒烟测试：在真实的 Chrome 里加载本扩展，打开一个复刻 B 站线上评论区
+ * 结构的页面（含多层 Shadow DOM、replies-renderer 里的楼中楼、图片形式的等级、
+ * 异步渲染的评论、置顶 AI 总结），检查：
+ *   - 昵称命中 / 正文特征 / 官方 AI 角标 / 楼中楼 / 晚到的评论是否都打上标签；
+ *   - 等级是否从 level_N.svg 正确读出；
+ *   - 普通人类评论（含楼中楼里的真人）是否保持干净；
+ *   - 点徽章能真正把评论折叠到 40px 以内；
  *   - tag_only 模式下不隐藏任何评论；
  *   - 置顶 AI 总结是否按默认配置隐藏。
  *
@@ -34,6 +37,33 @@ const CHROME_CANDIDATES = [
 ].filter(Boolean);
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+
+/** 点击指定分数的徽章，返回所属评论宿主折叠前后的高度 */
+const toggleBadgeExpression = (badgeText) => `(async () => {
+  const visit = (scope, out) => {
+    for (const el of scope.querySelectorAll("*")) {
+      out.push(el);
+      if (el.shadowRoot) visit(el.shadowRoot, out);
+    }
+    return out;
+  };
+  const badge = visit(document, []).find(
+    (el) => el.classList && el.classList.contains("bai-badge") && el.textContent.includes(${JSON.stringify(badgeText)})
+  );
+  if (!badge) return JSON.stringify({ error: "badge not found" });
+
+  let host = badge;
+  while (host && !/^BILI-COMMENT-(THREAD|REPLY)-RENDERER$/.test(host.tagName || "")) {
+    host = host.parentNode || (host.getRootNode && host.getRootNode().host) || null;
+  }
+  if (!host) return JSON.stringify({ error: "host not found" });
+
+  const before = host.getBoundingClientRect().height;
+  badge.click();
+  await new Promise((done) => setTimeout(done, 50));
+  const after = host.getBoundingClientRect().height;
+  return JSON.stringify({ before, after, collapsed: host.getAttribute("data-bai-collapsed") === "1" });
+})()`;
 
 const COLLECT_EXPRESSION = `(() => {
   const all = [];
@@ -232,15 +262,17 @@ async function main() {
         throw new Error(`等待状态超时：${description}`);
       });
 
-    // 阶段 1：默认配置（tag_only）
-    const data = await waitForState(sessionId, (state) => state.badgeTexts.length >= 4, "首轮打标");
+    // 阶段 1：默认配置（tag_only）。第 6 条评论 2.5s 后才渲染，等它出现
+    const data = await waitForState(sessionId, (state) => state.badgeTexts.length >= 6, "首轮打标");
 
     const texts = data.badgeTexts;
-    assert.equal(texts.length, 4, `期望 4 个标签，实际 ${texts.length}: ${JSON.stringify(texts)}`);
+    assert.equal(texts.length, 6, `期望 6 个标签，实际 ${texts.length}: ${JSON.stringify(texts)}`);
     assert.ok(texts.some((text) => text.includes("官方AI 100%")), "缺少官方 AI 标签");
     assert.ok(texts.some((text) => text.includes("疑似鱼灾 50%")), "缺少昵称命中 50% 标签");
     assert.ok(texts.some((text) => text.includes("疑似鱼灾 99%")), "缺少正文特征 99% 标签");
     assert.ok(texts.some((text) => text.includes("疑似鱼灾 95%")), "楼中楼未打标签");
+    assert.ok(texts.some((text) => text.includes("疑似鱼灾 75%")), "等级没有从 level_N.svg 读出");
+    assert.ok(texts.some((text) => text.includes("疑似鱼灾 85%")), "异步渲染的评论没有被识别");
 
     assert.equal(data.blocked, 0, "tag_only 模式不应隐藏任何评论");
     assert.equal(data.collapsed, 0, "初始状态不应有折叠");
@@ -249,6 +281,26 @@ async function main() {
       data.badgeTitles.some((title) => title.includes("人设")),
       "标签应带有判定依据"
     );
+
+    // 阶段 1.5：点徽章折叠，高度必须真的缩到 40px 左右，再点一次恢复
+    const toggle = async () => {
+      const evaluated = await browserCdp.send(
+        "Runtime.evaluate",
+        { expression: toggleBadgeExpression("疑似鱼灾 50%"), awaitPromise: true, returnByValue: true },
+        sessionId
+      );
+      return JSON.parse(evaluated.result.value);
+    };
+
+    const folded = await toggle();
+    assert.ok(!folded.error, folded.error);
+    assert.ok(folded.collapsed, "点击徽章后应进入折叠状态");
+    assert.ok(folded.before > 40, `折叠前高度异常：${folded.before}`);
+    assert.ok(folded.after <= 40, `折叠后高度应 ≤ 40px，实际 ${folded.after}`);
+
+    const unfolded = await toggle();
+    assert.equal(unfolded.collapsed, false, "再次点击应展开");
+    assert.ok(unfolded.after > 40, "展开后应恢复原高度");
 
     // 阶段 2：改配置（auto_block + 放开置顶总结），验证 storage.onChanged 链路
     const popupTarget = await browserCdp.send("Target.createTarget", {
@@ -287,11 +339,11 @@ async function main() {
 
     const blockedState = await waitForState(
       sessionId,
-      (state) => state.blocked >= 3 && state.summaryHidden === false,
+      (state) => state.blocked >= 5 && state.summaryHidden === false,
       "自动屏蔽生效 + 置顶总结恢复"
     );
-    assert.equal(blockedState.blocked, 3, "阈值 70 时应隐藏 99% / 95% / 100% 三条");
-    assert.equal(blockedState.badgeTexts.length, 4, "自动屏蔽后标签仍然保留");
+    assert.equal(blockedState.blocked, 5, "阈值 70 时应隐藏 99% / 95% / 100% / 75% / 85% 五条");
+    assert.equal(blockedState.badgeTexts.length, 6, "自动屏蔽后标签仍然保留");
 
     // 阶段 3：切回 tag_only，隐藏状态必须被完整恢复
     await setConfig({ enabled: true, actionType: "tag_only", blockOfficialAISummary: true });
@@ -300,7 +352,7 @@ async function main() {
       (state) => state.blocked === 0 && state.summaryHidden === true,
       "切回 tag_only 后恢复显示"
     );
-    assert.equal(restored.badgeTexts.length, 4, "恢复后标签数量不应变化");
+    assert.equal(restored.badgeTexts.length, 6, "恢复后标签数量不应变化");
 
     // 阶段 4：停用插件，所有装饰都应被撤掉
     await setConfig({ enabled: false });

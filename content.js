@@ -3,10 +3,10 @@
  *
  * 与旧版相比的关键变化：
  *   1. 配置与判定逻辑拆到 config.js / detector.js，默认值只有一份；
- *   2. 处理过的节点用 WeakMap 记住，只有新节点/配置变更才重新计算文本；
+ *   2. 处理过的节点用 WeakMap 记住「昵称+等级+正文」指纹，内容变了 / 徽章被冲掉才重新判定；
  *   3. 用 MutationObserver + 1.5s 兜底发现，取代「1s 全量递归遍历所有评论」；
  *   4. 自动隐藏与手动折叠使用不同的状态集合，切换模式能正确恢复原样；
- *   5. 扫描异常不再永久停摆。
+ *   5. 扫描异常只跳过出错的那一条评论。
  */
 (() => {
   "use strict";
@@ -18,8 +18,10 @@
   const { STORAGE_KEYS, normalizeConfig } = configApi;
   const { evaluate, shouldAutoBlock } = detector;
 
-  const COMMENT_SELECTOR =
-    "bili-comment-thread-renderer, bili-comment-reply-renderer, bili-comment-sub-thread-renderer";
+  // 线上结构：thread 的 shadowRoot 里是 #comment（楼主）+ replies-renderer，
+  // 楼中楼 reply-renderer 藏在 replies-renderer 自己的 shadowRoot 里
+  const COMMENT_SELECTOR = "bili-comment-thread-renderer, bili-comment-reply-renderer";
+  const REPLIES_SELECTOR = "bili-comment-replies-renderer";
   const SUMMARY_SELECTOR = "bili-comment-summary-renderer, .ai-summary-card";
 
   const BADGE_CLASS = "bai-badge";
@@ -118,10 +120,28 @@
       null;
     const name = nameEl ? collectText(nameEl) : "";
 
-    const levelEl = root.querySelector("#level, bili-comment-user-level, [class*='level']");
-    const level = levelEl ? parseLevel(collectText(levelEl)) : 0;
+    const levelEl = root.querySelector(
+      "#user-level, #level, bili-comment-user-level, [class*='level']"
+    );
+    const level = readLevel(levelEl);
 
     return { name, nameEl, level };
+  }
+
+  /** 线上等级是一张图（.../level_6.svg），没有文字；图、类名、文字依次兜底 */
+  function readLevel(el) {
+    if (!el) return 0;
+
+    const img = el.tagName === "IMG" ? el : el.querySelector("img");
+    const src = img ? img.getAttribute("src") || "" : "";
+    const fromSrc = src.match(/level_([0-6])(?!\d)/i);
+    if (fromSrc) return Number(fromSrc[1]);
+
+    const className = typeof el.className === "string" ? el.className : "";
+    const fromClass = className.match(/level[-_]?([0-6])(?!\d)/i);
+    if (fromClass) return Number(fromClass[1]);
+
+    return parseLevel(collectText(el));
   }
 
   function findContentEl(scope) {
@@ -259,21 +279,33 @@
    * 显示状态
    * ------------------------------------------------------------------ */
 
+  /**
+   * 评论宿主元素在线上是 display: inline，max-height 对行内元素无效，
+   * 折叠时必须切成 block；隐藏优先于折叠，两种状态都没有时恢复原样。
+   */
+  function syncDisplay(host) {
+    if (blockedHosts.has(host)) {
+      host.style.setProperty("display", "none", "important");
+    } else if (collapsedHosts.has(host)) {
+      host.style.setProperty("display", "block", "important");
+    } else {
+      host.style.removeProperty("display");
+    }
+  }
+
   function setBlocked(host, blocked) {
     if (!host) return;
 
     if (blocked) {
       blockedHosts.add(host);
       host.classList.add(BLOCK_CLASS);
-      host.style.setProperty("display", "none", "important");
       host.setAttribute("data-bai-blocked", "1");
-      return;
+    } else {
+      blockedHosts.delete(host);
+      host.classList.remove(BLOCK_CLASS);
+      host.removeAttribute("data-bai-blocked");
     }
-
-    blockedHosts.delete(host);
-    host.classList.remove(BLOCK_CLASS);
-    host.style.removeProperty("display");
-    host.removeAttribute("data-bai-blocked");
+    syncDisplay(host);
   }
 
   function setCollapsed(host, collapsed) {
@@ -282,6 +314,7 @@
     if (collapsed) {
       collapsedHosts.add(host);
       host.classList.add(COLLAPSE_CLASS);
+      syncDisplay(host);
       host.style.setProperty("max-height", "38px", "important");
       host.style.setProperty("overflow", "hidden", "important");
       host.style.setProperty("opacity", "0.35", "important");
@@ -292,6 +325,7 @@
 
     collapsedHosts.delete(host);
     host.classList.remove(COLLAPSE_CLASS);
+    syncDisplay(host);
     host.style.removeProperty("max-height");
     host.style.removeProperty("overflow");
     host.style.removeProperty("opacity");
@@ -346,8 +380,20 @@
     return created;
   }
 
+  /** 已处理且内容没变、该有的徽章也还在页面上，才可以跳过 */
+  function isUpToDate(node, signature) {
+    const record = processed.get(node);
+    if (!record || record.generation !== configGeneration) return false;
+    if (record.signature !== signature) return false;
+    if (!record.tagged) return true;
+
+    // Lit 重新渲染时可能把插进去的徽章冲掉，需要补回
+    const badge = badgeByHost.get(node);
+    return Boolean(badge && badge.isConnected);
+  }
+
   function processComment(node) {
-    if (!node || processed.get(node) === configGeneration) return;
+    if (!node) return;
 
     const root = node.shadowRoot || node;
     const renderer = root.querySelector("bili-comment-renderer") || node;
@@ -356,6 +402,17 @@
     const info = readUserInfo(scope);
     const contentEl = findContentEl(scope);
     const content = contentEl ? collectText(contentEl) : "";
+
+    // 组件是异步渲染的：昵称和正文都还没出来时先不记录，等下一轮再看
+    if (!info.name && !content) return;
+
+    const signature = `${info.name}\u0000${info.level}\u0000${content}`;
+    if (isUpToDate(node, signature)) return;
+
+    // 同一个节点被复用来显示另一条评论时，旧的手动折叠状态不应该带过去
+    const previous = processed.get(node);
+    if (previous && previous.signature !== signature) setCollapsed(node, false);
+
     // 角标区域 = 渲染器内除正文以外的文本，避免正文里提到「AI 生成」就判满
     const labelText = collectText(scope, contentEl);
 
@@ -368,7 +425,11 @@
     });
 
     const created = applyResult(node, info.nameEl || contentEl, result);
-    processed.set(node, configGeneration);
+    processed.set(node, {
+      generation: configGeneration,
+      signature,
+      tagged: result.score > 0
+    });
 
     if (created && !countedHosts.has(node)) {
       countedHosts.add(node);
@@ -376,18 +437,26 @@
     }
   }
 
+  function descend(node, depth) {
+    const shadow = node.shadowRoot;
+    if (!shadow) return;
+    observeNode(shadow);
+    scanRoot(shadow, depth + 1);
+  }
+
   function scanRoot(root, depth) {
     if (!root || depth > MAX_SHADOW_DEPTH) return;
 
     root.querySelectorAll(COMMENT_SELECTOR).forEach((node) => {
-      processComment(node);
-      // 楼中楼在 thread 自己的 shadowRoot 里，需要逐层向下
-      const shadow = node.shadowRoot;
-      if (shadow) {
-        observeNode(shadow);
-        scanRoot(shadow, depth + 1);
+      try {
+        processComment(node);
+      } catch (error) {
+        // 单条评论结构异常只跳过它自己，不影响同一轮里的其他评论
       }
+      descend(node, depth);
     });
+
+    root.querySelectorAll(REPLIES_SELECTOR).forEach((node) => descend(node, depth));
   }
 
   function syncSummaries(root) {
@@ -421,7 +490,7 @@
         scanRoot(target, 0);
       }
     } catch (error) {
-      // 单条评论结构异常时跳过本轮，不能像旧版那样把扫描彻底卡死
+      // 容器层结构异常时跳过本轮，下一轮兜底扫描会重试
     }
   }
 

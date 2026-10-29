@@ -9,7 +9,6 @@
 .bai-blocked,
 bili-comment-thread-renderer.bai-blocked,
 bili-comment-reply-renderer.bai-blocked,
-bili-comment-sub-thread-renderer.bai-blocked,
 bili-comment-summary-renderer.bai-blocked {
   display: none !important;
 }
@@ -22,6 +21,11 @@ bili-comment-reply-renderer.bai-collapsed {
   opacity: 0.35 !important;
   filter: grayscale(0.85) !important;
   transition: opacity 0.2s ease;
+}
+
+/* 评论宿主默认是行内元素，max-height 需要块级才生效 */
+.bai-collapsed:not(.bai-blocked) {
+  display: block !important;
 }
 
 .bai-collapsed:hover {

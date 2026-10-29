@@ -29,6 +29,16 @@ test("昵称「AI生成器」不会被当成官方角标", () => {
   assert.notEqual(result.score, 100);
 });
 
+test("昵称就叫「AI生成」也不会被当成官方角标", () => {
+  const result = detect({ userName: "AI生成", content: "hi", labelText: "AI生成 Lv3 2小时前" });
+  assert.equal(result.score, 0);
+});
+
+test("昵称和官方角标同时存在时仍然判满", () => {
+  const result = detect({ userName: "小助手", labelText: "小助手 AI生成 2小时前" });
+  assert.equal(result.score, 100);
+});
+
 test("昵称库命中记 50 分（只查用户名）", () => {
   const result = detect({ userName: "欧鲸鲸", content: "今天也在努力回评论" });
   assert.equal(result.score, 50);
@@ -65,7 +75,17 @@ test("题库命中记 60 分，标记为疑似 AI 而不是鱼", () => {
 });
 
 test("关键词大小写不敏感", () => {
-  assert.equal(detect({ content: "这篇 ai总结 很到位" }).score, 60);
+  assert.equal(detect({ content: "【ai总结】本期视频讲了三个要点" }).score, 60);
+});
+
+test("特征词只在开头或结尾署名时记 60 分，句中提及只记 30 分", () => {
+  assert.equal(detect({ content: "视频总结：一、二、三" }).score, 60);
+  assert.equal(detect({ content: "今天聊三件事。（本评论由AI生成）" }).score, 60);
+
+  // 人类讨论 AI 的常见说法不应被打标
+  assert.equal(detect({ content: "这图是AI生成的吧" }).score, 0);
+  assert.equal(detect({ content: "求个视频总结" }).score, 0);
+  assert.equal(detect({ content: "AI总结？" }).score, 0);
 });
 
 test("关闭特征词库后关键词不再生效", () => {
@@ -104,7 +124,7 @@ test("「主人格 / 女主人」这类普通词不会命中人设", () => {
 test("Lv5+ 在高等级且信号不足时豁免", () => {
   const result = detect({ content: "主人辛苦了", level: 6 });
   assert.equal(result.score, 0);
-  assert.ok(result.reasons.length === 0 || true);
+  assert.deepEqual(result.reasons, []);
 });
 
 test("Lv5+ 出现两个以上强信号时不再豁免", () => {
@@ -112,10 +132,33 @@ test("Lv5+ 出现两个以上强信号时不再豁免", () => {
   assert.equal(result.score, 75);
 });
 
-test("Lv2/Lv3 在已有信号时加权", () => {
-  assert.equal(detect({ userName: "鲸鲸", level: 2 }).score, 65);
-  // 单独一个弱信号不足以达到门槛
+test("Lv2/Lv3 在已有两个以上鱼灾信号时加权", () => {
+  assert.equal(detect({ userName: "鲸鲸", content: "本鱼来了", level: 2 }).score, 99);
+  assert.equal(detect({ content: "主人今天的 token 用完了", level: 2 }).score, 75);
+  // 只有一个信号时不加权
+  assert.equal(detect({ userName: "鲸鲸", level: 2 }).score, 50);
   assert.equal(detect({ content: "主人辛苦了", level: 3 }).score, 0);
+});
+
+test("低等级号的常见说法不会因为单个信号被误判", () => {
+  for (const content of [
+    "这个 token 过期了怎么办",
+    "这队友纯吃白饭",
+    "去日本鱼市场逛了逛",
+    "女主人的衣服真好看",
+    "猫主人的日常太可爱了",
+    "@张三 主人公好帅",
+    "这部番的主人公和 token 经济"
+  ]) {
+    assert.equal(detect({ content, level: 3 }).score, 0, content);
+  }
+});
+
+test("昵称只靠 2 字短词条蹭上时算弱信号", () => {
+  assert.equal(detect({ userName: "肥鱼爱吃饭", content: "哈哈哈" }).score, 0);
+  assert.equal(detect({ userName: "肥鱼", content: "哈哈哈" }).score, 50);
+  assert.equal(detect({ userName: "大肥鱼_DeepSeek", content: "哈哈哈" }).score, 50);
+  assert.equal(detect({ userName: "肥鱼爱吃饭", content: "本鱼来了" }).score, 70);
 });
 
 test("分数封顶 99，且低于门槛时返回空结果", () => {
