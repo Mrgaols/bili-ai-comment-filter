@@ -1,6 +1,6 @@
 # B 站 鱼灾 / AI 评论雷达
 
-![version](https://img.shields.io/badge/version-1.1.0-00aeec)
+![version](https://img.shields.io/badge/version-1.2.0-00aeec)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/Chrome%20%2F%20Edge-MV3-blue)
 
