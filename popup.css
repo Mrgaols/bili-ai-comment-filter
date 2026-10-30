@@ -295,3 +295,82 @@ textarea:disabled {
   background-color: #f1f2f3;
   color: #61666d;
 }
+
+/* 账号名单 */
+.lists {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.lists summary {
+  cursor: pointer;
+  padding: 2px 0;
+  color: #18191c;
+  list-style-position: inside;
+}
+
+.lists .count {
+  display: inline-block;
+  min-width: 16px;
+  margin-left: 2px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: #f1f2f3;
+  color: #61666d;
+  font-size: 11px;
+  text-align: center;
+}
+
+.account-list {
+  max-height: 120px;
+  margin: 4px 0 2px;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.account-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 0 2px 14px;
+}
+
+.account-list .account-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-list .link-btn {
+  flex: none;
+  white-space: nowrap;
+}
+
+.account-list .empty {
+  color: #9499a0;
+  font-size: 11px;
+}
+
+.memory-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 4px;
+  border-top: 1px solid #f1f2f3;
+  color: #61666d;
+}
+
+.toggle-note {
+  font-style: normal;
+  color: #9499a0;
+}
+
+.toggle-row input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}

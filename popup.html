@@ -26,18 +26,22 @@
       <div class="radio-group">
         <label class="radio-label">
           <input type="radio" name="actionType" value="tag_only" id="mode-tag">
-          <span>仅打概率标签 <em>（不自动隐藏，点标签可手动折叠）</em></span>
+          <span>仅打概率标签 <em>（点标签可折叠或标记账号）</em></span>
+        </label>
+        <label class="radio-label">
+          <input type="radio" name="actionType" value="auto_collapse" id="mode-collapse">
+          <span>达到阈值自动折叠 <em>（变灰收起，点标签可展开）</em></span>
         </label>
         <label class="radio-label">
           <input type="radio" name="actionType" value="auto_block" id="mode-block">
-          <span>达到阈值自动屏蔽</span>
+          <span>达到阈值自动隐藏</span>
         </label>
       </div>
 
       <div class="threshold-row" id="threshold-box">
-        <span class="threshold-label">自动屏蔽阈值</span>
+        <span class="threshold-label">自动处理阈值</span>
         <input type="range" id="threshold-range" min="50" max="95" step="5" value="70"
-               aria-label="自动屏蔽阈值">
+               aria-label="自动处理阈值">
         <span id="threshold-val" class="threshold-val">≥70%</span>
       </div>
     </div>
@@ -46,6 +50,11 @@
     <div class="section toggle-row highlight-box">
       <label for="block-fish">🐟 鱼灾专项</label>
       <input type="checkbox" id="block-fish">
+    </div>
+
+    <div class="section toggle-row">
+      <label for="check-avatar">看头像颜色 <em class="toggle-note">（鲸鱼娘蓝头像加分）</em></label>
+      <input type="checkbox" id="check-avatar">
     </div>
 
     <div class="section toggle-row">
@@ -66,7 +75,23 @@
     <div class="section">
       <label class="label-title" for="keyword-list">正文特征词库</label>
       <textarea id="keyword-list" rows="2" placeholder="AI总结&#10;省流助手&#10;视频AI提炼"></textarea>
-      <p class="hint">Token / 主人 / 尾巴 等人设特征内置生效，无需重复填写。</p>
+      <p class="hint">昵称 / 签名 / 正文里的鱼人设特征内置生效，无需重复填写。</p>
+    </div>
+
+    <!-- 账号名单：点评论标签里的「是鱼 / 这是真人」加进来，这里可以移除 -->
+    <div class="section lists">
+      <details id="fish-box">
+        <summary>🐟 标记为鱼的账号 <span class="count" id="fish-count">0</span></summary>
+        <ul class="account-list" id="fish-list"></ul>
+      </details>
+      <details id="human-box">
+        <summary>🙋 信任的真人 <span class="count" id="human-count">0</span></summary>
+        <ul class="account-list" id="human-list"></ul>
+      </details>
+      <div class="memory-row">
+        <span>🧠 已记住 <b id="memory-count">0</b> 个鱼账号</span>
+        <button type="button" class="link-btn" id="clear-memory">清空</button>
+      </div>
     </div>
 
     <div class="actions">

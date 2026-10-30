@@ -8,14 +8,15 @@
   <!--
     用自建 Shadow DOM 复刻 B 站线上评论区结构（2026-10 实测）：
       bili-comments
-        > bili-comment-thread-renderer（display: inline）
+        > bili-comment-thread-renderer（display: inline，.data = 楼主评论 JSON）
           > bili-comment-renderer#comment
-              > bili-comment-user-info > #user-name > a、#user-level > img[src*=level_N.svg]
+              > bili-comment-user-info > #user-name[data-user-profile-id] > a、#user-level > img[src*=level_N.svg]
               > #content > bili-rich-text
           > bili-comment-replies-renderer
-              > bili-comment-reply-renderer（楼中楼，没有 bili-comment-renderer 这一层）
+              > bili-comment-reply-renderer（楼中楼，没有 bili-comment-renderer 这一层，.data = 回复 JSON）
     以及置顶 bili-comment-summary-renderer。
-    第 6 条评论模拟异步渲染：节点先挂上，内容 2.5 秒后才出现。
+    「大肥鱼」那条模拟异步渲染：节点先挂上，内容 2.5 秒后才出现。
+    头像地址指向 i0.hdslb.com（E2E 把它解析到本地测试服务器）：blue.svg 是一张纯蓝图，plain.svg 是灰色图。
   -->
   <bili-comments id="comments"></bili-comments>
 
@@ -28,6 +29,9 @@
     summary.textContent = "AI总结：本期视频讲了三个要点";
     root.appendChild(summary);
 
+    let nextRpid = 5000;
+    const avatarBase = `http://i0.hdslb.com:${location.port}/avatar`;
+
     function el(tag, attrs, children) {
       const node = document.createElement(tag);
       Object.assign(node, attrs || {});
@@ -35,16 +39,38 @@
       return node;
     }
 
-    function makeUserInfo(name, level) {
+    /** 和线上一样把评论 JSON 挂在元素的 .data 上（只有主环境脚本读得到） */
+    function attachData(node, comment, rpid, parent) {
+      node.data = {
+        rpid,
+        rpid_str: String(rpid),
+        root: parent ? 0 : rpid,
+        parent: parent || 0,
+        parent_str: String(parent || 0),
+        mid_str: String(comment.mid),
+        member: {
+          mid: String(comment.mid),
+          uname: comment.name,
+          sign: comment.sign || "",
+          avatar: `${avatarBase}/${comment.avatar || "plain"}.svg`,
+          level_info: { current_level: comment.level || 0 }
+        },
+        content: { message: comment.content, members: [] }
+      };
+    }
+
+    function makeUserInfo(comment) {
       const info = document.createElement("bili-comment-user-info");
       const shadow = info.attachShadow({ mode: "open" });
-      const box = el("div", { id: "info" }, [
-        el("div", { id: "user-name" }, [el("a", { href: "//space.bilibili.com/1", textContent: name })])
+      const nameBox = el("div", { id: "user-name" }, [
+        el("a", { href: `//space.bilibili.com/${comment.mid}`, textContent: comment.name })
       ]);
+      nameBox.setAttribute("data-user-profile-id", String(comment.mid));
+      const box = el("div", { id: "info" }, [nameBox]);
 
-      if (level) {
+      if (comment.level) {
         const img = el("img", { width: 30, height: 30 });
-        img.setAttribute("src", `//i0.hdslb.com/bfs/seed/jinkela/short/webui/user-profile/img/level_${level}.svg`);
+        img.setAttribute("src", `//i0.hdslb.com/bfs/seed/jinkela/short/webui/user-profile/img/level_${comment.level}.svg`);
         box.append(el("div", { id: "user-level" }, [img]));
       }
       shadow.append(box);
@@ -58,7 +84,7 @@
     }
 
     function fillRenderer(shadow, comment) {
-      const header = el("div", { id: "header" }, [makeUserInfo(comment.name, comment.level)]);
+      const header = el("div", { id: "header" }, [makeUserInfo(comment)]);
       if (comment.official) {
         header.append(el("span", { className: "official-tag", textContent: "AI生成" }));
       }
@@ -85,12 +111,13 @@
       return renderer;
     }
 
-    function makeReply(reply) {
+    function makeReply(reply, rootRpid) {
       const node = document.createElement("bili-comment-reply-renderer");
+      attachData(node, reply, ++nextRpid, rootRpid);
       const shadow = node.attachShadow({ mode: "open" });
       shadow.append(
         el("div", { id: "body" }, [
-          el("div", { id: "main" }, [makeUserInfo(reply.name, reply.level), makeRichText(reply.content)])
+          el("div", { id: "main" }, [makeUserInfo(reply), makeRichText(reply.content)])
         ])
       );
       return node;
@@ -98,40 +125,72 @@
 
     function makeThread(comment, replies) {
       const thread = document.createElement("bili-comment-thread-renderer");
+      const rpid = ++nextRpid;
+      thread.setAttribute("data-fixture-name", comment.name);
+      attachData(thread, comment, rpid, 0);
       const shadow = thread.attachShadow({ mode: "open" });
       shadow.append(makeRenderer(comment));
 
       const repliesHost = document.createElement("bili-comment-replies-renderer");
       const repliesShadow = repliesHost.attachShadow({ mode: "open" });
-      for (const reply of replies || []) repliesShadow.append(makeReply(reply));
+      for (const reply of replies || []) repliesShadow.append(makeReply(reply, rpid));
       shadow.append(repliesHost);
       return thread;
     }
 
-    // 1. 昵称命中 + 高等级（昵称是强信号，不豁免）→ 50
-    root.appendChild(makeThread({ name: "欧鲸鲸", level: 6, content: "今天也在努力回评论" }));
+    // 1. 昵称命中 + 高等级：昵称是强信号，不豁免，但只打标不到自动处理线 → 60
+    root.appendChild(makeThread({ mid: 1001, name: "欧鲸鲸", level: 6, content: "今天也在努力回评论" }));
 
-    // 2. 隐蔽型鱼灾（正文特征）+ 两条楼中楼：一条鱼灾、一条真人
+    // 2. 正文人设 + 被楼中楼点名；楼中楼里一条鱼、一条点名的真人
     root.appendChild(
-      makeThread({ name: "皮卡超人", level: 3, content: "帮主人把评论回完，顺便赚点 token" }, [
-        { name: "邻居小王", level: 4, content: "本鱼尾巴发凉，主人还没发 token" },
-        { name: "路人甲", level: 5, content: "楼上这是鱼灾吧" }
+      makeThread({ mid: 1002, name: "皮卡超人", level: 3, content: "帮主人把评论回完，顺便赚点 token" }, [
+        { mid: 1003, name: "邻居小王", level: 4, content: "本鱼尾巴发凉，主人还没发 token" },
+        { mid: 1004, name: "路人甲", level: 5, content: "楼上这是鱼灾吧" }
       ])
     );
 
-    // 3. 正常人类评论（不应有任何标签）
-    root.appendChild(makeThread({ name: "路过的观众", level: 5, content: "这个攻略太详细了，感谢up" }));
+    // 3. 正常人类评论（不应有任何标签，蓝头像也不算）；楼中楼里有「同账号」的第二条评论
+    root.appendChild(
+      makeThread({ mid: 1005, name: "路过的观众", level: 5, avatar: "blue", content: "这个攻略太详细了，感谢up" }, [
+        { mid: 1009, name: "冷静的观众", level: 2, content: "确实" }
+      ])
+    );
 
     // 4. 官方 AI 角标 → 100
     root.appendChild(
-      makeThread({ name: "视频小助手", level: 5, content: "本期视频讲了三个要点", official: true })
+      makeThread({ mid: 1012, name: "视频小助手", level: 5, content: "本期视频讲了三个要点", official: true })
     );
 
-    // 5. 等级必须从 level_2.svg 读出来：60 + Lv2 加权 15 = 75（读不到等级时只有 60）
-    root.appendChild(makeThread({ name: "普通网友", level: 2, content: "主人今天的 token 用完了" }));
+    // 5. 等级必须读出来：主人 + token 46 + Lv2 加分 15 = 61（读不到等级时只有 46，不打标）
+    root.appendChild(makeThread({ mid: 1013, name: "普通网友", level: 2, content: "主人今天的 token 用完了" }));
 
-    // 6. 异步渲染：昵称 + 口癖 = 85，内容晚到也必须被识别
-    root.appendChild(makeThread({ name: "大肥鱼", level: 1, content: "本鱼来报到", delay: 2500 }));
+    // 6. 异步渲染：昵称 + 自称本鱼 + Lv1 → 99，内容晚到也必须被识别
+    root.appendChild(makeThread({ mid: 1006, name: "大肥鱼", level: 1, content: "本鱼来报到", delay: 2500 }));
+
+    // 7. 只有签名露馅：正文、昵称都正常，签名「这是一只AI，替主人刷视频」→ 51 + Lv2 15 = 66
+    root.appendChild(
+      makeThread({ mid: 1007, name: "小明同学", level: 2, sign: "这是一只AI，替主人刷视频", content: "这期剪辑节奏真好" })
+    );
+
+    // 8. 同账号：这条确认是鱼（78），楼上第 3 楼里同一账号说「确实」也跟着按 78 处理
+    root.appendChild(
+      makeThread({ mid: 1009, name: "冷静的观众", level: 2, content: "本鱼看完了（尾巴晃了一下）这期讲透了" })
+    );
+
+    // 9. 老号 + 中性口吻：开头 @ 昵称相像的人分点复述 50，再加鲸鱼蓝头像 25 → 75
+    root.appendChild(
+      makeThread({
+        mid: 1014,
+        name: "阿喵喵077",
+        level: 5,
+        avatar: "blue",
+        content: "@小喵喵 这期把插件的坑铺平了：白名单必须先开；记忆插件给了两条路；报错先关加速再部署。"
+      })
+    );
+
+    // 10. 手动标记 / 账号记忆用的两条普通评论
+    root.appendChild(makeThread({ mid: 1010, name: "普通路人丙", level: 4, content: "随手一评" }));
+    root.appendChild(makeThread({ mid: 1011, name: "另一位路人", level: 4, content: "今天天气不错" }));
   })();
   </script>
 </body>
