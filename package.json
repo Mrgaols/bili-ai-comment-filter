@@ -1,6 +1,6 @@
 {
   "name": "bili-ai-comment-radar",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "private": true,
   "description": "识别并过滤 Bilibili 评论区 AI 挂机评论（鱼灾）的浏览器扩展",
   "license": "MIT",

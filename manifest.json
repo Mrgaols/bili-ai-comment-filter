@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "B站 鱼灾/AI 评论雷达",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "description": "识别并过滤 Bilibili 评论区的大肥鱼/鲸鲸等 AI 挂机评论，支持概率打标与一键折叠",
   "homepage_url": "https://github.com/Mrgaols/bili-ai-comment-filter",
   "minimum_chrome_version": "111",
