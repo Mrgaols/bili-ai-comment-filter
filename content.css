@@ -37,6 +37,27 @@ bili-comment-reply-renderer.bai-collapsed {
   transform: translateY(-1px);
 }
 
+/* 没被识别的评论上的「标记」按钮：平时看不见，鼠标移到评论上才出现 */
+.bai-mark {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.bai-mark[data-show] {
+  opacity: 0.6;
+}
+
+.bai-mark[data-pin] {
+  opacity: 0.85;
+}
+
+.bai-mark:hover,
+.bai-mark:focus-visible,
+.bai-mark[data-open] {
+  opacity: 1;
+}
+
+.bai-mark:focus-visible,
 .bai-badge:focus-visible {
   outline: 2px solid #00aeec;
   outline-offset: 1px;

@@ -32,6 +32,9 @@
   const BRIDGE_ATTR = "data-bai-info";
 
   const BADGE_CLASS = "bai-badge";
+  // 没被识别的评论上那个淡淡的「标记」按钮：和徽章是同一个元素，只是换了类名和外观
+  const MARK_CLASS = "bai-mark";
+  const NOTE_CLASS = "bai-hidden-note";
   const BLOCK_CLASS = "bai-blocked";
   const COLLAPSE_CLASS = "bai-collapsed";
   const MAX_TEXT_LENGTH = 4000;
@@ -74,6 +77,11 @@
   const collapsedEls = new Map();
   // 用户手动展开过的元素，自动折叠模式不再把它折回去
   let userExpanded = new WeakSet();
+  // 被隐藏后用户点「显示」临时看的评论
+  let revealed = new WeakSet();
+  const noteByOwn = new WeakMap();
+  const notes = new Set();
+  const hoverBound = new WeakSet();
   const hiddenSummaries = new Set();
   const observedRoots = new WeakSet();
   const styledRoots = new WeakSet();
@@ -114,7 +122,14 @@
           return;
         }
         // 自己插进去的徽章不算评论内容
-        if (node.classList && node.classList.contains(BADGE_CLASS)) return;
+        if (
+          node.classList &&
+          (node.classList.contains(BADGE_CLASS) ||
+            node.classList.contains(MARK_CLASS) ||
+            node.classList.contains(NOTE_CLASS))
+        ) {
+          return;
+        }
         if (node.shadowRoot) {
           for (const child of node.shadowRoot.childNodes) walk(child, level + 1);
         }
@@ -367,6 +382,11 @@
     style.textContent = `
       .${BADGE_CLASS}:hover { filter: brightness(0.95); transform: translateY(-1px); }
       .${BADGE_CLASS}:focus-visible { outline: 2px solid #00aeec; outline-offset: 1px; }
+      .${MARK_CLASS} { opacity: 0; transition: opacity 0.15s; }
+      .${MARK_CLASS}[data-show] { opacity: 0.6; }
+      .${MARK_CLASS}[data-pin] { opacity: 0.85; }
+      .${MARK_CLASS}:hover, .${MARK_CLASS}:focus-visible, .${MARK_CLASS}[data-open] { opacity: 1; }
+      .${MARK_CLASS}:focus-visible { outline: 2px solid #00aeec; outline-offset: 1px; }
     `;
     root.appendChild(style);
   }
@@ -377,11 +397,42 @@
     return { bg: "#fef3c7", border: "#fde68a", color: "#d97706" };
   }
 
-  function applyBadgeLook(badge, result) {
+  function applyBadgeLook(badge, result, ghost) {
     // 每轮扫描都会调用，结果没变就别反复写样式
-    const key = `${result.badgeText}\u0000${result.isWhale}\u0000${result.reasons.join("、")}`;
+    const key = ghost
+      ? "ghost"
+      : `${result.badgeText}\u0000${result.isWhale}\u0000${result.reasons.join("、")}`;
     if (badgeLook.get(badge) === key) return;
     badgeLook.set(badge, key);
+
+    const textEl = badge.querySelector(".bai-badge-text");
+    badge.className = ghost ? MARK_CLASS : BADGE_CLASS;
+
+    if (ghost) {
+      // 不写 opacity：显隐由注入到 shadow root 的样式按悬停状态控制
+      badge.style.cssText = `
+        display: inline-flex !important;
+        align-items: center !important;
+        margin-left: 8px !important;
+        padding: 0 6px !important;
+        font-size: 11px !important;
+        line-height: 16px !important;
+        font-weight: 400 !important;
+        color: #9499a0 !important;
+        background-color: transparent !important;
+        border: 1px dashed #c9ccd0 !important;
+        border-radius: 4px !important;
+        cursor: pointer !important;
+        user-select: none !important;
+        vertical-align: middle !important;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+        white-space: nowrap !important;
+      `;
+      if (textEl) textEl.textContent = "标记";
+      badge.title = "点击可折叠这条评论，或把这个账号标记为鱼";
+      badge.setAttribute("aria-label", "标记或折叠这条评论");
+      return;
+    }
 
     const palette = paletteFor(result);
     badge.style.cssText = `
@@ -405,7 +456,6 @@
       white-space: nowrap !important;
     `;
 
-    const textEl = badge.querySelector(".bai-badge-text");
     if (textEl && textEl.textContent !== result.badgeText) {
       textEl.textContent = result.badgeText;
     }
@@ -449,40 +499,61 @@
     return badge;
   }
 
-  function injectBadge(item, result) {
+  /** ghost = 这条评论没被识别，放一个悬停才出现的「标记」按钮，菜单和徽章共用 */
+  function injectBadge(item, result, ghost) {
     const { node } = item;
     let badge = badgeByHost.get(node);
-    let created = false;
 
     if (!badge || !badge.isConnected) {
       if (badge) badges.delete(badge);
       badge = createBadge();
-      const anchor = item.nameEl || item.contentEl;
-      if (anchor && anchor.parentNode) {
-        anchor.insertAdjacentElement("afterend", badge);
-      } else if (node.shadowRoot) {
-        node.shadowRoot.prepend(badge);
-      } else {
-        node.prepend(badge);
-      }
-      ensureShadowStyle(badge);
       badgeByHost.set(node, badge);
       badges.add(badge);
-      created = true;
     }
 
-    applyBadgeLook(badge, result);
+    applyBadgeLook(badge, result, ghost);
     badgeState.set(badge, { own: item.own, mid: item.mid, name: item.name, result });
-    return created;
+    return badge;
   }
 
-  function removeBadge(node) {
-    const badge = badgeByHost.get(node);
-    if (!badge) return;
-    if (menuBadge === badge) closeMenu();
-    if (badge.isConnected) badge.remove();
-    badges.delete(badge);
-    badgeByHost.delete(node);
+  /**
+   * 徽章放在昵称后面；「标记」按钮放在操作栏的「回复」后面，这样平时看不见的它不会在昵称旁留空。
+   * 折叠着的评论操作栏被裁掉了，这时「标记」按钮也回到昵称后面。
+   */
+  function placeBadge(badge, item, inFooter) {
+    if (inFooter) {
+      const actions = item.scope.querySelector("bili-comment-action-buttons-renderer");
+      const reply = actions && actions.shadowRoot ? actions.shadowRoot.querySelector("#reply") : null;
+      if (reply) {
+        if (badge.previousElementSibling !== reply) reply.insertAdjacentElement("afterend", badge);
+        ensureShadowStyle(badge);
+        return;
+      }
+    }
+
+    const anchor = item.nameEl || item.contentEl;
+    if (anchor && anchor.parentNode) {
+      if (badge.previousElementSibling !== anchor) anchor.insertAdjacentElement("afterend", badge);
+    } else if (!badge.isConnected) {
+      if (item.node.shadowRoot) item.node.shadowRoot.prepend(badge);
+      else item.node.prepend(badge);
+    }
+    ensureShadowStyle(badge);
+  }
+
+  /** 鼠标移到评论上才显出「标记」按钮 */
+  function bindHover(item) {
+    const { own, node } = item;
+    if (hoverBound.has(own)) return;
+    hoverBound.add(own);
+    const set = (show) => {
+      const badge = badgeByHost.get(node);
+      if (!badge) return;
+      if (show) badge.setAttribute("data-show", "1");
+      else badge.removeAttribute("data-show");
+    };
+    own.addEventListener("pointerenter", () => set(true));
+    own.addEventListener("pointerleave", () => set(false));
   }
 
   /** 菜单挂在文档顶层（固定定位），不会被折叠后的评论裁掉，样式由 content.css 提供 */
@@ -525,9 +596,14 @@
     const el = ensureMenu();
     el.replaceChildren();
 
+    const tagged = state.result.score > 0;
+    const current = state.mid ? markOf(marks, state.mid) : null;
+
     const reasons = document.createElement("div");
     reasons.className = "bai-menu-reasons";
-    reasons.textContent = `判定依据：${state.result.reasons.join("、")}`;
+    if (tagged) reasons.textContent = `判定依据：${state.result.reasons.join("、")}`;
+    else if (current === "human") reasons.textContent = "你标记过这个账号是真人，不再识别";
+    else reasons.textContent = "这条评论没有被识别为鱼";
     el.appendChild(reasons);
 
     const collapsed = collapsedEls.has(state.own);
@@ -536,13 +612,16 @@
     );
 
     if (state.mid) {
-      const current = markOf(marks, state.mid);
       if (current === "fish") {
         addMenuItem(el, "取消「是鱼」标记", () => updateMark(state, null));
       } else {
         addMenuItem(el, "🐟 是鱼：以后总是隐藏这个账号", () => updateMark(state, "fish"));
       }
-      addMenuItem(el, "🙋 误判：这是真人，不再标记", () => updateMark(state, "human"));
+      if (current === "human") {
+        addMenuItem(el, "取消「这是真人」标记", () => updateMark(state, null));
+      } else if (tagged) {
+        addMenuItem(el, "🙋 误判：这是真人，不再标记", () => updateMark(state, "human"));
+      }
     } else {
       const note = document.createElement("div");
       note.className = "bai-menu-note";
@@ -552,6 +631,7 @@
 
     el.hidden = false;
     menuBadge = badge;
+    badge.setAttribute("data-open", "1");
 
     // 默认放在徽章下方，放不下就放到上方
     const rect = badge.getBoundingClientRect();
@@ -567,6 +647,7 @@
 
   function closeMenu() {
     if (menu) menu.hidden = true;
+    if (menuBadge) menuBadge.removeAttribute("data-open");
     menuBadge = null;
   }
 
@@ -601,6 +682,96 @@
       userExpanded.delete(el);
       setCollapsed(el, true, "manual");
     }
+    scheduleScan();
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 隐藏后的提示行
+   * ------------------------------------------------------------------ */
+
+  function noteText(item, result, shown) {
+    const who = item.name ? `「${item.name.slice(0, 16)}」` : "";
+    if (shown) return `正在临时显示被隐藏的评论 ${who}`;
+    if (result.marked) return `🐟 已隐藏你标记为鱼的账号 ${who} 的评论`;
+    return result.isWhale
+      ? `🐟 已隐藏一条疑似鱼灾评论 ${who} ${result.score}%`
+      : `🤖 已隐藏一条疑似 AI 评论 ${who} ${result.score}%`;
+  }
+
+  /** 在被隐藏的评论原位置留一行提示，点「显示」可以临时看一眼，确认有没有误杀 */
+  function syncNote(item, result, shown) {
+    const { own } = item;
+    let note = noteByOwn.get(own);
+
+    if (!note || !note.isConnected) {
+      if (note) notes.delete(note);
+      // 和正文左边对齐（要在评论被隐藏之前量）
+      const ownRect = own.getBoundingClientRect();
+      // 楼主对齐正文；楼中楼的正文跟在昵称后面，对齐头像那一列
+      const anchor = item.isThread
+        ? item.contentEl || item.nameEl
+        : item.scope.querySelector("bili-comment-user-info") || item.nameEl;
+      const indent =
+        anchor && ownRect.width > 0
+          ? Math.max(0, Math.min(120, Math.round(anchor.getBoundingClientRect().left - ownRect.left)))
+          : 0;
+
+      note = document.createElement("div");
+      note.className = NOTE_CLASS;
+      note.style.cssText = `
+        display: flex !important;
+        align-items: center !important;
+        gap: 8px !important;
+        box-sizing: border-box !important;
+        padding: 4px 0 4px ${indent}px !important;
+        font-size: 12px !important;
+        line-height: 18px !important;
+        color: #9499a0 !important;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+      `;
+
+      const text = document.createElement("span");
+      text.className = "bai-hidden-note-text";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.style.cssText = `
+        flex: none !important;
+        margin: 0 !important;
+        padding: 0 4px !important;
+        border: 0 !important;
+        background: none !important;
+        color: #00aeec !important;
+        font: inherit !important;
+        cursor: pointer !important;
+      `;
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (revealed.has(own)) revealed.delete(own);
+        else revealed.add(own);
+        // 马上生效，不等下一轮扫描
+        scanAll();
+      });
+
+      note.append(text, button);
+      own.insertAdjacentElement("beforebegin", note);
+      noteByOwn.set(own, note);
+      notes.add(note);
+    }
+
+    const text = noteText(item, result, shown);
+    const textEl = note.firstChild;
+    if (textEl.textContent !== text) textEl.textContent = text;
+    const label = shown ? "重新隐藏" : "显示";
+    if (note.lastChild.textContent !== label) note.lastChild.textContent = label;
+  }
+
+  function removeNote(own) {
+    const note = noteByOwn.get(own);
+    if (!note) return;
+    if (note.isConnected) note.remove();
+    notes.delete(note);
+    noteByOwn.delete(own);
   }
 
   /* ------------------------------------------------------------------ *
@@ -688,6 +859,10 @@
       if (badge.isConnected) badge.remove();
     }
     badges.clear();
+    for (const note of Array.from(notes)) {
+      if (note.isConnected) note.remove();
+    }
+    notes.clear();
 
     for (const el of Array.from(blockedEls)) setBlocked(el, false);
     // 只是改了设置时，用户自己折叠 / 展开过的评论保持原样
@@ -695,7 +870,10 @@
       if (!keepManual || reason !== "manual") setCollapsed(el, false);
     }
     for (const el of Array.from(hiddenSummaries)) setSummaryHidden(el, false);
-    if (!keepManual) userExpanded = new WeakSet();
+    if (!keepManual) {
+      userExpanded = new WeakSet();
+      revealed = new WeakSet();
+    }
   }
 
   /* ------------------------------------------------------------------ *
@@ -800,6 +978,7 @@
     if (record && !sameComment) {
       setCollapsed(item.own, false);
       userExpanded.delete(item.own);
+      revealed.delete(item.own);
     }
 
     // 角标区域 = 渲染器内除正文以外的文本，避免正文里提到「AI 生成」就判满
@@ -827,25 +1006,38 @@
 
   function applyItem(item, result) {
     const { node, own } = item;
+    const tagged = result.score > 0;
 
-    if (result.score <= 0) {
-      removeBadge(node);
-      setBlocked(own, false);
-      // 标签没了就没法再点开，手动折叠的也一并展开
-      setCollapsed(own, false);
-      return;
+    // 没被识别的评论也放一个悬停才出现的「标记」按钮，认不出来的鱼可以手动标
+    const badge = injectBadge(item, result, !tagged);
+    bindHover(item);
+
+    const action = tagged ? actionFor(config, result) : "none";
+    const hide = action === "hide";
+    const shown = hide && revealed.has(own);
+
+    if (hide && config.showHiddenNote) {
+      // 提示行要在隐藏之前插入，才能量到正文的缩进
+      syncNote(item, result, shown);
+    } else {
+      removeNote(own);
+      if (!hide) revealed.delete(own);
     }
+    setBlocked(own, hide && !shown);
 
-    const created = injectBadge(item, result);
-    const action = actionFor(config, result);
-    setBlocked(own, action === "hide");
     if (action === "collapse") {
       if (!collapsedEls.has(own) && !userExpanded.has(own)) setCollapsed(own, true, "auto");
     } else if (collapsedEls.get(own) === "auto") {
       setCollapsed(own, false);
     }
 
-    if (created && !countedHosts.has(node)) {
+    // 折叠着的评论，「标记」按钮一直显示在昵称后面，不然找不到地方展开
+    const pinned = !tagged && collapsedEls.has(own);
+    if (pinned) badge.setAttribute("data-pin", "1");
+    else badge.removeAttribute("data-pin");
+    placeBadge(badge, item, !tagged && !pinned);
+
+    if (tagged && !countedHosts.has(node)) {
       countedHosts.add(node);
       bumpCount();
     }

@@ -83,6 +83,19 @@
       return rich;
     }
 
+    // 线上的操作栏是一个 display: flex 的组件，时间 / 点赞 / 回复都在它的 shadowRoot 里
+    function makeActions() {
+      const actions = document.createElement("bili-comment-action-buttons-renderer");
+      actions.style.display = "flex";
+      actions.attachShadow({ mode: "open" }).append(
+        el("div", { id: "pubdate", textContent: "2小时前" }),
+        el("div", { id: "like", textContent: "赞" }),
+        el("div", { id: "reply", textContent: "回复" }),
+        el("div", { id: "more" })
+      );
+      return actions;
+    }
+
     function fillRenderer(shadow, comment) {
       const header = el("div", { id: "header" }, [makeUserInfo(comment)]);
       if (comment.official) {
@@ -93,7 +106,7 @@
           el("div", { id: "main" }, [
             header,
             el("div", { id: "content" }, [makeRichText(comment.content)]),
-            el("div", { id: "footer", textContent: "2小时前 回复" })
+            el("div", { id: "footer" }, [makeActions()])
           ])
         ])
       );

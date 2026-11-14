@@ -46,6 +46,8 @@
     blockByKeywords: true,
     // 看头像颜色：鲸鱼娘头像大片是蓝色（会从 B 站图床加载一张 48px 的头像小图）
     checkAvatar: true,
+    // 被隐藏的评论在原位置留一行提示，点「显示」可以临时看一眼
+    showHiddenNote: true,
 
     // 只匹配用户名，绝不匹配正文
     whaleNames: [
@@ -132,6 +134,7 @@
       ),
       blockByKeywords: toBool(input.blockByKeywords, DEFAULT_CONFIG.blockByKeywords),
       checkAvatar: toBool(input.checkAvatar, DEFAULT_CONFIG.checkAvatar),
+      showHiddenNote: toBool(input.showHiddenNote, DEFAULT_CONFIG.showHiddenNote),
       whaleNames: cleanList(input.whaleNames, DEFAULT_CONFIG.whaleNames),
       keywords: cleanList(input.keywords, DEFAULT_CONFIG.keywords)
     };

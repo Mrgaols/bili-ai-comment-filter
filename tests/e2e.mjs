@@ -11,6 +11,8 @@
  *   - 仅打标 / 自动隐藏 / 自动折叠三种模式，自动隐藏不连带楼中楼；
  *   - 手动标记「是鱼 / 真人」与账号记忆通过 storage 生效，单独移除记忆也会同步；
  *   - 手动折叠的评论在改设置后保持折叠；
+ *   - 没被识别的评论有悬停才出现的「标记」按钮，能标记为鱼；
+ *   - 被隐藏的评论原位置留一行提示，可以临时显示再重新隐藏；
  *   - 置顶 AI 总结是否按配置隐藏。
  *
  * 运行：npm run test:e2e
@@ -83,6 +85,62 @@ const menuActionExpression = (badgeText, itemText) => `(async () => {
   });
 })()`;
 
+/**
+ * 对某个昵称的那条评论做一件事：
+ *   - menu:文字  点它的徽章 / 「标记」按钮，再点菜单里包含这段文字的一项
+ *   - note       点它上方提示行里的按钮（显示 / 重新隐藏）
+ */
+const commentActionExpression = (name, action) => `(async () => {
+  ${VISIT_ALL}
+  const host = visit(document, []).find(
+    (el) => el.data && el.data.member && el.data.member.uname === ${JSON.stringify(name)}
+  );
+  if (!host) return JSON.stringify({ error: "comment not found" });
+  const own = host.tagName === "BILI-COMMENT-THREAD-RENDERER" ? host.shadowRoot.querySelector("bili-comment-renderer") : host;
+  const action = ${JSON.stringify(action)};
+  const wait = () => new Promise((done) => setTimeout(done, 80));
+
+  if (action === "note") {
+    const note = own.previousElementSibling;
+    if (!note || !note.classList.contains("bai-hidden-note")) return JSON.stringify({ error: "note not found" });
+    note.querySelector("button").click();
+    await wait();
+    return JSON.stringify({
+      blocked: own.getAttribute("data-bai-blocked") === "1",
+      height: own.getBoundingClientRect().height,
+      button: note.querySelector("button").textContent,
+      text: note.textContent
+    });
+  }
+
+  const handle = visit(host.shadowRoot || host, []).find(
+    (el) => el.classList && (el.classList.contains("bai-badge") || el.classList.contains("bai-mark"))
+  );
+  if (!handle) return JSON.stringify({ error: "badge / mark not found" });
+  const ghost = handle.classList.contains("bai-mark");
+  const idleOpacity = getComputedStyle(handle).opacity;
+  handle.click();
+  await wait();
+  const menu = document.querySelector(".bai-menu");
+  if (!menu || menu.hidden) return JSON.stringify({ error: "menu not open" });
+  const buttons = [...menu.querySelectorAll("button")];
+  const labels = buttons.map((b) => b.textContent);
+  const item = buttons.find((b) => b.textContent.includes(action.slice(5)));
+  if (!item) return JSON.stringify({ error: "menu item not found: " + labels.join(" / ") });
+  item.click();
+  await wait();
+  const holder = handle.getRootNode().host;
+  return JSON.stringify({
+    ghost,
+    // 「标记」按钮平时在操作栏的「回复」后面
+    inFooter: Boolean(holder) && holder.tagName === "BILI-COMMENT-ACTION-BUTTONS-RENDERER",
+    afterReply: Boolean(handle.previousElementSibling) && handle.previousElementSibling.id === "reply",
+    idleOpacity,
+    labels,
+    collapsed: own.getAttribute("data-bai-collapsed") === "1"
+  });
+})()`;
+
 /** 某个昵称那条评论的宿主元素现在的高度（0 = 被藏起来了） */
 const heightOfExpression = (name) => `(() => {
   ${VISIT_ALL}
@@ -108,6 +166,8 @@ const COLLECT_EXPRESSION = `(() => {
     badgeTitles: badges.map((badge) => badge.title),
     blocked: all.filter((el) => el.getAttribute("data-bai-blocked") === "1").length,
     collapsed: all.filter((el) => el.getAttribute("data-bai-collapsed") === "1").length,
+    marks: all.filter((el) => el.classList && el.classList.contains("bai-mark")).length,
+    notes: all.filter((el) => el.classList && el.classList.contains("bai-hidden-note")).length,
     summaryHidden: all.some(
       (el) =>
         el.tagName === "BILI-COMMENT-SUMMARY-RENDERER" &&
@@ -322,6 +382,8 @@ async function main() {
     assert.equal(count("疑似鱼灾 78%"), 2, "同账号的第二条评论没有跟着处理");
     assert.equal(count("疑似鱼灾 75%"), 1, "头像颜色没有算进去");
 
+    assert.ok(data.marks >= 3, `没被识别的评论应该各有一个「标记」按钮，实际 ${data.marks}`);
+    assert.equal(data.notes, 0, "没有隐藏时不应出现提示行");
     assert.equal(data.blocked, 0, "tag_only 模式不应隐藏任何评论");
     assert.equal(data.collapsed, 0, "初始状态不应有折叠");
     assert.equal(data.summaryHidden, true, "置顶 AI 总结应被隐藏");
@@ -389,6 +451,7 @@ async function main() {
     );
     assert.equal(blockedState.blocked, 7, "阈值 70 时应隐藏 99% ×2 / 74% / 75% / 78% ×2 / 100% 七条");
     assert.equal(blockedState.badgeTexts.length, 10, "自动隐藏后标签仍然保留");
+    assert.equal(blockedState.notes, 7, "每条被隐藏的评论原位置应留一行提示");
     const bystander = await evaluateIn(sessionId, heightOfExpression("路人甲"));
     assert.ok(bystander.found && bystander.height > 0, "楼主被隐藏时，楼中楼里的真人回复应该还看得见");
 
@@ -419,6 +482,30 @@ async function main() {
     assert.equal(afterSave.collapsed, 1, "改设置后，手动折叠的那条应保持折叠");
     assert.equal(afterSave.badgeTexts.length, 10, "改设置后标签应重新打上");
 
+    // 阶段 4.8：没被识别的评论 —— 「标记」按钮平时看不见，点开菜单标记为鱼后被隐藏并留一行提示
+    const ghostMark = await evaluateIn(sessionId, commentActionExpression("普通路人丙", "menu:是鱼"));
+    assert.ok(!ghostMark.error, ghostMark.error);
+    assert.ok(ghostMark.ghost, "没被识别的评论上应该是「标记」按钮而不是徽章");
+    assert.equal(ghostMark.idleOpacity, "0", "「标记」按钮在鼠标没移上去时应该看不见");
+    assert.ok(ghostMark.inFooter && ghostMark.afterReply, "「标记」按钮应放在操作栏的「回复」后面");
+    assert.ok(!ghostMark.labels.some((label) => label.includes("误判")), "没被识别的评论不需要「误判」选项");
+    const ghostMarked = await waitForState(
+      sessionId,
+      (state) => state.blocked === 1 && state.notes === 1,
+      "用「标记」按钮标记为鱼后隐藏并留提示"
+    );
+    assert.ok(ghostMarked.badgeTexts.some((text) => text.includes("已标记为鱼")));
+
+    // 点提示行的「显示」临时看一眼，再点「重新隐藏」
+    const peek = await evaluateIn(sessionId, commentActionExpression("普通路人丙", "note"));
+    assert.ok(!peek.error, peek.error);
+    assert.equal(peek.blocked, false, "点「显示」后评论应临时显示");
+    assert.ok(peek.height > 0, "临时显示的评论应该有高度");
+    assert.equal(peek.button, "重新隐藏");
+    const rehide = await evaluateIn(sessionId, commentActionExpression("普通路人丙", "note"));
+    assert.equal(rehide.blocked, true, "点「重新隐藏」后应再次隐藏");
+    assert.equal(rehide.button, "显示");
+
     // 阶段 5：手动标记 —— 「真人」的标签消失，「是鱼」的总是隐藏（即使是 tag_only）
     const now = Date.now();
     await setStorage({
@@ -433,7 +520,14 @@ async function main() {
       "手动标记生效"
     );
     assert.ok(marked.badgeTexts.some((text) => text.includes("已标记为鱼")), "标记为鱼的评论应带标签");
-    assert.equal(marked.collapsed, 0, "标记为真人后标签消失，之前手动折叠的那条应自动展开");
+    // 标记为真人后徽章换成「标记」按钮，手动折叠保持，可以从按钮的菜单里展开、撤销标记
+    assert.equal(marked.collapsed, 1, "手动折叠的评论被标记为真人后保持折叠");
+    const trusted = await evaluateIn(sessionId, commentActionExpression("欧鲸鲸", "menu:展开这条评论"));
+    assert.ok(!trusted.error, trusted.error);
+    assert.ok(trusted.ghost, "标记为真人的评论上应该是「标记」按钮");
+    assert.equal(trusted.inFooter, false, "折叠着的评论，「标记」按钮应挪到昵称后面（操作栏被裁掉了）");
+    assert.equal(trusted.collapsed, false, "从「标记」按钮的菜单里应能展开");
+    assert.ok(trusted.labels.some((label) => label.includes("取消「这是真人」标记")), "应能撤销真人标记");
 
     // 阶段 6：账号记忆 —— 之前被记住的账号，正文再普通也按记住的分数处理
     await setStorage({ biliAiMemory: { 1011: { s: 85, n: "另一位路人", t: now } } });
@@ -460,6 +554,8 @@ async function main() {
       "停用后清除所有标签与隐藏"
     );
     assert.equal(disabled.collapsed, 0);
+    assert.equal(disabled.marks, 0, "停用后「标记」按钮也应撤掉");
+    assert.equal(disabled.notes, 0, "停用后提示行也应撤掉");
 
     console.log("✅ E2E 通过：", JSON.stringify(texts));
   } finally {

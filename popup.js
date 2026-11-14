@@ -29,6 +29,7 @@
     blockOfficial: document.getElementById("block-official"),
     blockKeywords: document.getElementById("block-keywords"),
     checkAvatar: document.getElementById("check-avatar"),
+    showHiddenNote: document.getElementById("show-hidden-note"),
     whaleNames: document.getElementById("whale-names"),
     keywordList: document.getElementById("keyword-list"),
     saveBtn: document.getElementById("save-btn"),
@@ -112,6 +113,7 @@
     els.blockOfficial.checked = normalized.blockOfficialAISummary;
     els.blockKeywords.checked = normalized.blockByKeywords;
     els.checkAvatar.checked = normalized.checkAvatar;
+    els.showHiddenNote.checked = normalized.showHiddenNote;
 
     els.whaleNames.value = normalized.whaleNames.join("\n");
     els.keywordList.value = normalized.keywords.join("\n");
@@ -128,6 +130,7 @@
       blockOfficialAISummary: els.blockOfficial.checked,
       blockByKeywords: els.blockKeywords.checked,
       checkAvatar: els.checkAvatar.checked,
+      showHiddenNote: els.showHiddenNote.checked,
       whaleNames: parseList(els.whaleNames.value),
       keywords: parseList(els.keywordList.value)
     });
@@ -244,6 +247,7 @@
       els.blockOfficial,
       els.blockKeywords,
       els.checkAvatar,
+      els.showHiddenNote,
       els.whaleNames,
       els.keywordList
     ];
@@ -295,6 +299,7 @@
     els.blockOfficial.checked = DEFAULT_CONFIG.blockOfficialAISummary;
     els.blockKeywords.checked = DEFAULT_CONFIG.blockByKeywords;
     els.checkAvatar.checked = DEFAULT_CONFIG.checkAvatar;
+    els.showHiddenNote.checked = DEFAULT_CONFIG.showHiddenNote;
     els.whaleNames.value = DEFAULT_CONFIG.whaleNames.join("\n");
     els.keywordList.value = DEFAULT_CONFIG.keywords.join("\n");
     syncFormState();

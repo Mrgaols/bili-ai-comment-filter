@@ -18,6 +18,7 @@ test("normalizeConfig 空输入全部回落到默认值", () => {
     blockOfficialAISummary: DEFAULT_CONFIG.blockOfficialAISummary,
     blockByKeywords: DEFAULT_CONFIG.blockByKeywords,
     checkAvatar: DEFAULT_CONFIG.checkAvatar,
+    showHiddenNote: DEFAULT_CONFIG.showHiddenNote,
     whaleNames: DEFAULT_CONFIG.whaleNames,
     keywords: DEFAULT_CONFIG.keywords
   });
