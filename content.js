@@ -43,6 +43,7 @@
   const AVATAR_HOST_RE = /(?:^|\.)hdslb\.com$/i;
   const AVATAR_SIZE = 32;
   const AVATAR_TIMEOUT_MS = 8000;
+  const AVATAR_RETRY_MS = 30000;
   const MAX_AVATAR_JOBS = 4;
   const MAX_AVATAR_CACHE = 3000;
 
@@ -51,7 +52,7 @@
   let memory = normalizeMemory(null);
   let configGeneration = 0;
   let ready = false;
-  let detectedCount = 0;
+  let pendingCount = 0;
   let countTimer = null;
   let memoryTimer = null;
   const pendingMemory = new Map();
@@ -59,6 +60,7 @@
   const avatarCache = new Map();
   const avatarQueue = [];
   const avatarQueued = new Set();
+  const avatarRetried = new Set();
   let avatarJobs = 0;
 
   let processed = new WeakMap();
@@ -305,10 +307,22 @@
       avatarJobs += 1;
       measureAvatar(key)
         .then((ratio) => rememberAvatar(key, ratio))
-        .catch(() => rememberAvatar(key, null))
+        .catch(() => {
+          // 第一次失败可能只是网络抖动，过一会儿再试一次；还不行就不再看这张头像
+          if (avatarRetried.has(key)) {
+            rememberAvatar(key, null);
+            return;
+          }
+          avatarRetried.add(key);
+          avatarQueued.add(key);
+          setTimeout(() => {
+            avatarQueue.push(key);
+            pumpAvatars();
+          }, AVATAR_RETRY_MS);
+        })
         .finally(() => {
           avatarJobs -= 1;
-          avatarQueued.delete(key);
+          if (!avatarRetried.has(key) || avatarCache.has(key)) avatarQueued.delete(key);
           pumpAvatars();
           // 算出来之后重新判定一轮（指纹里带着头像结果）
           scheduleScan();
@@ -668,7 +682,7 @@
   }
 
   /** 把本脚本加过的样式/标签全部撤掉（切换配置、停用插件时调用） */
-  function clearDecorations() {
+  function clearDecorations(keepManual) {
     closeMenu();
     for (const badge of Array.from(badges)) {
       if (badge.isConnected) badge.remove();
@@ -676,9 +690,12 @@
     badges.clear();
 
     for (const el of Array.from(blockedEls)) setBlocked(el, false);
-    for (const el of Array.from(collapsedEls.keys())) setCollapsed(el, false);
+    // 只是改了设置时，用户自己折叠 / 展开过的评论保持原样
+    for (const [el, reason] of Array.from(collapsedEls)) {
+      if (!keepManual || reason !== "manual") setCollapsed(el, false);
+    }
     for (const el of Array.from(hiddenSummaries)) setSummaryHidden(el, false);
-    userExpanded = new WeakSet();
+    if (!keepManual) userExpanded = new WeakSet();
   }
 
   /* ------------------------------------------------------------------ *
@@ -735,7 +752,7 @@
 
   /** 楼中楼里点名「人机 / 大肥鱼」的回复：记到被回复的那条头上 */
   function computeCallouts(items) {
-    const counts = new Map();
+    const voters = new Map();
     const byRpid = new Map();
     for (const item of items) if (item.rpid) byRpid.set(item.rpid, item);
 
@@ -754,8 +771,13 @@
       }
 
       if (!target || target === item || (target.mid && target.mid === item.mid)) continue;
-      counts.set(target, (counts.get(target) || 0) + 1);
+      // 按回复人去重：同一个人连回几条「人机」只算一次
+      if (!voters.has(target)) voters.set(target, new Set());
+      voters.get(target).add(item.mid || `name:${item.name}`);
     }
+
+    const counts = new Map();
+    for (const [target, people] of voters) counts.set(target, people.size);
     return counts;
   }
 
@@ -809,7 +831,8 @@
     if (result.score <= 0) {
       removeBadge(node);
       setBlocked(own, false);
-      if (collapsedEls.get(own) === "auto") setCollapsed(own, false);
+      // 标签没了就没法再点开，手动折叠的也一并展开
+      setCollapsed(own, false);
       return;
     }
 
@@ -859,8 +882,9 @@
     for (const item of items) {
       const result = item.result;
       if (!item.mid || !result || !result.isWhale || result.marked) continue;
-      if (result.score < CONFIRMED_SCORE) continue;
-      pageBest.set(item.mid, Math.max(pageBest.get(item.mid) || 0, result.score));
+      const fishScore = Number(result.fishScore) || 0;
+      if (fishScore < CONFIRMED_SCORE) continue;
+      pageBest.set(item.mid, Math.max(pageBest.get(item.mid) || 0, fishScore));
     }
 
     for (const item of items) {
@@ -874,8 +898,9 @@
             ? applyKnown(item.result, fromPage, "page", config)
             : applyKnown(item.result, fromMemory, "memory", config);
         applyItem(item, result);
-        if (result.isWhale && !result.marked && result.score >= CONFIRMED_SCORE) {
-          rememberFish(item.mid, item.name, result.score);
+        // 只有这次真的又被认出来才刷新记忆；单靠记忆命中的不续期，免得误判的账号永远留着
+        if (fromPage >= CONFIRMED_SCORE && !result.marked && !result.trusted) {
+          rememberFish(item.mid, item.name, fromPage);
         }
       } catch (error) {
         // 同上：只跳过出错的这一条
@@ -888,7 +913,8 @@
    * ------------------------------------------------------------------ */
 
   function scheduleScan() {
-    if (!ready || !config.enabled || scanTimer !== null) return;
+    // 标签页在后台时不扫描，切回来时补扫一次
+    if (!ready || !config.enabled || scanTimer !== null || document.hidden) return;
     scanTimer = setTimeout(() => {
       scanTimer = null;
       scanAll();
@@ -908,7 +934,7 @@
 
   /** 兜底发现：评论容器可能晚于脚本创建，影子根也可能延迟挂载 */
   function discoveryTick() {
-    if (!ready || !config.enabled) return;
+    if (!ready || !config.enabled || document.hidden) return;
 
     document.querySelectorAll("bili-comments").forEach((host) => {
       observeNode(host);
@@ -984,7 +1010,7 @@
     config = normalizeConfig(raw);
     configGeneration += 1;
     processed = new WeakMap();
-    clearDecorations();
+    clearDecorations(config.enabled);
 
     if (!config.enabled) {
       if (scanTimer !== null) {
@@ -996,18 +1022,18 @@
     scheduleScan();
   }
 
+  /** 多个标签页各自累加：写回时读出最新值再加上这段时间新增的条数 */
   function bumpCount() {
-    detectedCount += 1;
+    pendingCount += 1;
     if (countTimer !== null) return;
     countTimer = setTimeout(() => {
       countTimer = null;
-      if (hasChromeStorage()) {
-        try {
-          chrome.storage.local.set({ [STORAGE_KEYS.count]: detectedCount });
-        } catch (error) {
-          // 扩展被更新 / 卸载时 context 会失效，忽略即可
-        }
-      }
+      const delta = pendingCount;
+      pendingCount = 0;
+      updateStored(STORAGE_KEYS.count, (stored) => {
+        const base = Number(stored);
+        return (Number.isFinite(base) && base >= 0 ? base : 0) + delta;
+      });
     }, 1000);
   }
 
@@ -1017,33 +1043,22 @@
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local") return;
 
-      // 面板里「重置计数」会改 storage，本地缓存必须跟着走，否则下一次写回旧值
-      if (changes[STORAGE_KEYS.count]) {
-        const next = Number(changes[STORAGE_KEYS.count].newValue);
-        if (Number.isFinite(next) && next >= 0 && next !== detectedCount) {
-          detectedCount = next;
-          if (countTimer !== null) {
-            clearTimeout(countTimer);
-            countTimer = null;
-          }
-        }
-      }
-
       if (changes[STORAGE_KEYS.marks]) {
         marks = normalizeMarks(changes[STORAGE_KEYS.marks].newValue);
         scheduleScan();
       }
 
       if (changes[STORAGE_KEYS.memory]) {
+        const before = normalizeMemory(changes[STORAGE_KEYS.memory].oldValue);
         const next = normalizeMemory(changes[STORAGE_KEYS.memory].newValue);
-        if (Object.keys(next).length === 0) {
-          // 面板里清空了记忆
-          memory = next;
-          pendingMemory.clear();
-        } else {
-          // 别的标签页记住的鱼也合并进来
-          memory = mergeMemory(memory, next);
+        // 面板里移除 / 清空的账号，这里也要忘掉；别的标签页新记住的合并进来
+        const kept = { ...memory };
+        for (const mid of Object.keys(before)) {
+          if (next[mid]) continue;
+          delete kept[mid];
+          pendingMemory.delete(mid);
         }
+        memory = mergeMemory(kept, next);
         scheduleScan();
       }
 
@@ -1060,13 +1075,9 @@
       return;
     }
 
-    const keys = [STORAGE_KEYS.config, STORAGE_KEYS.count, STORAGE_KEYS.marks, STORAGE_KEYS.memory];
+    const keys = [STORAGE_KEYS.config, STORAGE_KEYS.marks, STORAGE_KEYS.memory];
     const onLoaded = (result) => {
       const stored = result || {};
-      if (typeof stored[STORAGE_KEYS.count] === "number" && stored[STORAGE_KEYS.count] >= 0) {
-        detectedCount = stored[STORAGE_KEYS.count];
-      }
-
       config = normalizeConfig(stored[STORAGE_KEYS.config]);
       marks = normalizeMarks(stored[STORAGE_KEYS.marks]);
       memory = normalizeMemory(stored[STORAGE_KEYS.memory]);
@@ -1089,6 +1100,9 @@
 
     listenForStorageChanges();
     listenForMenuDismiss();
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) scheduleScan();
+    });
     loadState(() => {
       if (config.enabled) scheduleScan();
     });

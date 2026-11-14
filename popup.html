@@ -88,12 +88,17 @@
         <summary>🙋 信任的真人 <span class="count" id="human-count">0</span></summary>
         <ul class="account-list" id="human-list"></ul>
       </details>
-      <div class="memory-row">
-        <span>🧠 已记住 <b id="memory-count">0</b> 个鱼账号</span>
-        <button type="button" class="link-btn" id="clear-memory">清空</button>
-      </div>
+      <details id="memory-box">
+        <summary>🧠 自动记住的鱼账号 <span class="count" id="memory-count">0</span></summary>
+        <ul class="account-list" id="memory-list"></ul>
+        <div class="memory-row">
+          <span id="memory-note">判到 70 分以上的账号会记在这里</span>
+          <button type="button" class="link-btn" id="clear-memory">全部清空</button>
+        </div>
+      </details>
     </div>
 
+    <p class="dirty-note" id="dirty-note" hidden>有修改还没保存，直接关掉面板会丢失。</p>
     <div class="actions">
       <button id="save-btn" class="btn primary" type="button">保存并应用</button>
       <button id="reset-btn" class="btn secondary" type="button">恢复默认</button>

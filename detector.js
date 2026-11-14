@@ -7,6 +7,8 @@
  *   - 正文先去掉「回复 @某某 :」前缀和 @ 到的昵称，回复鱼的真人不会被鱼的昵称连累；
  *   - 正文特征词库完全来自用户配置：出现在开头 / 作为结尾署名时 +60，夹在句中只 +30；
  *   - Lv1-3 新号在已有信号时加分，Lv5+ 在昵称 / 签名都不像鱼且正文信号弱时减分；
+ *   - 只有弱信号（昵称含鲸 / 含 bot、排版、头像）时最多 69 分，不触发默认的自动处理和账号记忆；
+ *   - 特征词库的分数和鱼灾部分分开算：等级减分不扣它，它也不会让账号被当成鱼记住；
  *   - 分数 < 50 一律视为未命中（界面不显示标签）。
  */
 (function (root, factory) {
@@ -106,6 +108,12 @@
     { min: 25, score: 15, label: "头像偏鲸鱼蓝" }
   ];
   const STRONG_TEXT_SCORE = 40;
+  // 「像样的信号」门槛：昵称 40 分以上、签名或正文单条 25 分以上、或者被人点名。
+  // 一条都没有时（只有「昵称含鲸」「含 bot」这类弱命中），排版 / 表情之类的弱正文特征不计分，
+  // 鱼灾部分最多 69 分：可以打标，但到不了默认的自动处理线，也不会被记进账号记忆。
+  const SOLID_NAME_SCORE = 40;
+  const SOLID_HIT_SCORE = 25;
+  const WEAK_ONLY_MAX_SCORE = 69;
 
   const MIN_SCORE = 50;
 
@@ -342,6 +350,7 @@
     if (context.mark === "fish") {
       return {
         score: MARKED_SCORE,
+        fishScore: MARKED_SCORE,
         reasons: ["你标记过这个账号是鱼"],
         isWhale: true,
         marked: true,
@@ -366,6 +375,7 @@
     let account = 0;
     let text = 0;
     let callout = 0;
+    let solid = false;
 
     // 1. 鱼灾专项：账号特征 + 正文人设 + 被点名
     if (config.blockFishDisaster !== false) {
@@ -390,50 +400,69 @@
         textHits.push(R(null, OWNER_REPORT_SCORE, "开头 @ 昵称相像的人汇报"));
       }
       textHits.sort((a, b) => b.score - a.score);
-      matched.persona = textHits.map((hit) => hit.label);
-      text = combine(textHits, [1, 0.5, 0.25]);
-      if (textHits.length > 0) reasons.push(`正文：${clipped(matched.persona, 2)}`);
-
       const calledOut = Math.max(0, Number(context.calledOut) || 0);
+      const top = (hits) => (hits.length > 0 ? strongest(hits).score : 0);
+      solid =
+        top(names.hits) >= SOLID_NAME_SCORE ||
+        top(signHits) >= SOLID_HIT_SCORE ||
+        top(textHits) >= SOLID_HIT_SCORE ||
+        calledOut > 0;
+
+      // 没有像样的信号时，弱正文特征（排版、表情等）不计分也不展示
+      const countedText = solid ? textHits : [];
+      matched.persona = countedText.map((hit) => hit.label);
+      text = combine(countedText, [1, 0.5, 0.25]);
+      if (countedText.length > 0) reasons.push(`正文：${clipped(matched.persona, 2)}`);
+
       if (calledOut > 0) {
         callout = Math.min(
           CALLOUT_MAX_SCORE,
           CALLOUT_FIRST_SCORE + CALLOUT_EXTRA_SCORE * (calledOut - 1)
         );
-        reasons.push(`被回复点名「人机 / 大肥鱼」${calledOut} 次`);
+        reasons.push(`被回复点名「人机 / 大肥鱼」（${calledOut} 人）`);
       }
     }
 
-    let score = account + text + callout;
+    // 2. 等级修正：只修正鱼灾部分，不单独构成判定依据，也不影响特征词库的分数
+    const rawFish = account + text + callout;
+    let fish = rawFish;
+    if (level >= 1 && level <= 3 && rawFish >= LOW_LEVEL_MIN_SCORE) {
+      fish += LOW_LEVEL_BONUS;
+      reasons.push(`Lv${level} 新号`);
+    } else if (
+      level >= 5 &&
+      rawFish > 0 &&
+      account < STRONG_ACCOUNT_SCORE &&
+      text < STRONG_TEXT_SCORE
+    ) {
+      fish = Math.max(0, fish + HIGH_LEVEL_EXEMPTION);
+      reasons.push(`Lv${level} 老号减分`);
+    }
+    if (!solid) fish = Math.min(fish, WEAK_ONLY_MAX_SCORE);
+    fish = clampScore(fish);
 
-    // 2. 用户自定义的正文特征词库
+    // 3. 用户自定义的正文特征词库
+    let keywordScore = 0;
     if (config.blockByKeywords !== false) {
       matched.keywords = matchKeywords(content, config.keywords);
       if (matched.keywords.length > 0) {
         const prominent = matched.keywords.some((item) => isProminentKeyword(content, item));
-        score += prominent ? KEYWORD_SCORE : KEYWORD_INLINE_SCORE;
+        keywordScore = prominent ? KEYWORD_SCORE : KEYWORD_INLINE_SCORE;
         reasons.push(`特征词「${clipped(matched.keywords, 2)}」${prominent ? "" : "（句中提及）"}`);
       }
     }
 
-    // 3. 等级修正（只做加减分，不单独构成判定依据）
-    const fishScore = account + text + callout;
-    if (level >= 1 && level <= 3 && fishScore >= LOW_LEVEL_MIN_SCORE) {
-      score += LOW_LEVEL_BONUS;
-      reasons.push(`Lv${level} 新号`);
-    } else if (level >= 5 && account < STRONG_ACCOUNT_SCORE && text < STRONG_TEXT_SCORE) {
-      score += HIGH_LEVEL_EXEMPTION;
-      reasons.push(`Lv${level} 老号减分`);
-    }
-
-    score = clampScore(score);
-    const isWhale = account > 0 || text > 0 || callout > 0;
+    const score = clampScore(fish + keywordScore);
+    // 算不算「鱼」只看鱼灾部分：靠特征词凑过线的是普通 AI 评论，不该连累这个账号
+    const isWhale = rawFish > 0 && (keywordScore === 0 || fish >= MIN_SCORE);
     const result =
       score < MIN_SCORE
         ? // 没到打标线也把命中了哪些信号带回去，内容脚本据此决定要不要再看头像
           { ...emptyResult(), matched }
         : {
             score,
+            // 鱼灾部分单独的分数：同账号联动和账号记忆只认这个
+            fishScore: isWhale ? fish : 0,
             reasons,
             isWhale,
             badgeText: isWhale ? `🐟 疑似鱼灾 ${score}%` : `🤖 疑似AI ${score}%`,
@@ -457,6 +486,7 @@
     return {
       ...result,
       score: known,
+      fishScore: known,
       reasons: [
         ...(result.reasons || []),
         knownSource === "memory" ? "这个账号之前被识别为鱼" : "同账号的其它评论已判定为鱼"

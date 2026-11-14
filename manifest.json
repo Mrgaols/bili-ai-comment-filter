@@ -29,6 +29,16 @@
       "matches": [
         "*://*.bilibili.com/*"
       ],
+      "exclude_matches": [
+        "*://live.bilibili.com/*",
+        "*://passport.bilibili.com/*",
+        "*://account.bilibili.com/*",
+        "*://member.bilibili.com/*",
+        "*://message.bilibili.com/*",
+        "*://pay.bilibili.com/*",
+        "*://link.bilibili.com/*",
+        "*://search.bilibili.com/*"
+      ],
       "js": [
         "bridge.js"
       ],
@@ -38,6 +48,16 @@
     {
       "matches": [
         "*://*.bilibili.com/*"
+      ],
+      "exclude_matches": [
+        "*://live.bilibili.com/*",
+        "*://passport.bilibili.com/*",
+        "*://account.bilibili.com/*",
+        "*://member.bilibili.com/*",
+        "*://message.bilibili.com/*",
+        "*://pay.bilibili.com/*",
+        "*://link.bilibili.com/*",
+        "*://search.bilibili.com/*"
       ],
       "js": [
         "config.js",

@@ -9,7 +9,8 @@
  *   - 普通人类评论（含楼中楼里的真人）是否保持干净；
  *   - 徽章菜单能真正把这条评论折叠到 40px 以内，再展开；
  *   - 仅打标 / 自动隐藏 / 自动折叠三种模式，自动隐藏不连带楼中楼；
- *   - 手动标记「是鱼 / 真人」与账号记忆通过 storage 生效；
+ *   - 手动标记「是鱼 / 真人」与账号记忆通过 storage 生效，单独移除记忆也会同步；
+ *   - 手动折叠的评论在改设置后保持折叠；
  *   - 置顶 AI 总结是否按配置隐藏。
  *
  * 运行：npm run test:e2e
@@ -345,7 +346,9 @@ async function main() {
 
     // 阶段 2：改配置（auto_block + 放开置顶总结），验证 storage.onChanged 链路
     const popupTarget = await browserCdp.send("Target.createTarget", {
-      url: `chrome-extension://${loaded.id}/popup.html`
+      url: `chrome-extension://${loaded.id}/popup.html`,
+      // 放在后台打开：被测页面必须保持可见，插件在后台标签页里会暂停扫描
+      background: true
     });
     const popupAttached = await browserCdp.send("Target.attachToTarget", {
       targetId: popupTarget.targetId,
@@ -407,6 +410,15 @@ async function main() {
     );
     assert.equal(restored.badgeTexts.length, 10, "恢复后标签数量不应变化");
 
+    // 阶段 4.5：手动折叠的评论，改设置后应保持折叠（不被「保存并应用」冲掉）
+    const kept = await evaluateIn(sessionId, menuActionExpression("疑似鱼灾 58%", "折叠这条评论"));
+    assert.ok(kept.collapsed, kept.error || "手动折叠失败");
+    await setConfig({ enabled: true, actionType: "tag_only", blockThreshold: 80 });
+    await sleep(1500);
+    const afterSave = await readState(sessionId);
+    assert.equal(afterSave.collapsed, 1, "改设置后，手动折叠的那条应保持折叠");
+    assert.equal(afterSave.badgeTexts.length, 10, "改设置后标签应重新打上");
+
     // 阶段 5：手动标记 —— 「真人」的标签消失，「是鱼」的总是隐藏（即使是 tag_only）
     const now = Date.now();
     await setStorage({
@@ -421,6 +433,7 @@ async function main() {
       "手动标记生效"
     );
     assert.ok(marked.badgeTexts.some((text) => text.includes("已标记为鱼")), "标记为鱼的评论应带标签");
+    assert.equal(marked.collapsed, 0, "标记为真人后标签消失，之前手动折叠的那条应自动展开");
 
     // 阶段 6：账号记忆 —— 之前被记住的账号，正文再普通也按记住的分数处理
     await setStorage({ biliAiMemory: { 1011: { s: 85, n: "另一位路人", t: now } } });
@@ -430,6 +443,14 @@ async function main() {
       "账号记忆生效"
     );
     assert.ok(remembered.badgeTitles.join("\n").includes("之前被识别为鱼"), "记忆命中应注明原因");
+
+    // 阶段 6.5：在面板里单独移除这个账号（记忆里还留着别的），页面上也要跟着忘掉
+    await setStorage({ biliAiMemory: { 999999: { s: 90, n: "不在本页的鱼", t: now } } });
+    await waitForState(
+      sessionId,
+      (state) => !state.badgeTexts.some((text) => text.includes("疑似鱼灾 85%")),
+      "从记忆里移除单个账号后不再按记忆处理"
+    );
 
     // 阶段 7：停用插件，所有装饰都应被撤掉
     await setConfig({ enabled: false });

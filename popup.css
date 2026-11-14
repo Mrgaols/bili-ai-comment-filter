@@ -360,9 +360,27 @@ textarea:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-top: 4px;
-  border-top: 1px solid #f1f2f3;
-  color: #61666d;
+  padding: 2px 0 2px 14px;
+  color: #9499a0;
+  font-size: 11px;
+}
+
+.account-list .account-score {
+  flex: none;
+  margin-left: auto;
+  color: #9499a0;
+  font-size: 11px;
+}
+
+.dirty-note {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #d97706;
+  text-align: center;
+}
+
+.btn.primary.dirty {
+  background-color: #f59e0b;
 }
 
 .toggle-note {

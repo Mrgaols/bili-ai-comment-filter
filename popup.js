@@ -38,12 +38,22 @@
     humanCount: document.getElementById("human-count"),
     humanList: document.getElementById("human-list"),
     memoryCount: document.getElementById("memory-count"),
+    memoryList: document.getElementById("memory-list"),
+    memoryNote: document.getElementById("memory-note"),
+    dirtyNote: document.getElementById("dirty-note"),
     clearMemory: document.getElementById("clear-memory")
   };
 
   const modeInputs = [els.modeTag, els.modeCollapse, els.modeBlock];
 
+  // 记忆最多 3000 条，面板里只列最近的一部分
+  const MAX_MEMORY_ROWS = 200;
+  const SAVE_LABEL = "保存并应用";
+  const DIRTY_LABEL = "保存修改";
+
   let toastTimer = null;
+  // 上一次保存的设置（不含总开关，它是即时生效的），用来判断表单有没有没保存的修改
+  let savedSnapshot = "";
 
   function showToast(text) {
     let toast = document.querySelector(".toast");
@@ -123,9 +133,21 @@
     });
   }
 
+  function snapshot(config) {
+    return JSON.stringify({ ...config, enabled: undefined });
+  }
+
+  /** 表单和已保存的设置不一样时，把保存按钮标出来，免得关掉面板白改 */
+  function refreshDirty() {
+    const dirty = savedSnapshot !== "" && snapshot(readFormConfig()) !== savedSnapshot;
+    els.saveBtn.classList.toggle("dirty", dirty);
+    els.saveBtn.textContent = dirty ? DIRTY_LABEL : SAVE_LABEL;
+    els.dirtyNote.hidden = !dirty;
+  }
+
   /* ---------------- 账号名单 ---------------- */
 
-  function renderAccounts(listEl, countEl, accounts, kind) {
+  function renderAccounts(listEl, countEl, accounts, options) {
     const entries = Object.entries(accounts).sort((a, b) => b[1].t - a[1].t);
     countEl.textContent = String(entries.length);
     listEl.replaceChildren();
@@ -133,12 +155,12 @@
     if (entries.length === 0) {
       const empty = document.createElement("li");
       empty.className = "empty";
-      empty.textContent = "还没有。在评论区点标签就能加进来。";
+      empty.textContent = options.emptyText;
       listEl.appendChild(empty);
       return;
     }
 
-    for (const [mid, item] of entries) {
+    for (const [mid, item] of entries.slice(0, options.limit || entries.length)) {
       const li = document.createElement("li");
       const name = document.createElement("span");
       name.className = "account-name";
@@ -150,21 +172,52 @@
       remove.className = "link-btn";
       remove.textContent = "移除";
       remove.setAttribute("aria-label", `从名单移除 ${item.n || mid}`);
-      remove.addEventListener("click", () => removeMark(mid, kind));
+      remove.addEventListener("click", () => options.onRemove(mid));
 
-      li.append(name, remove);
+      li.append(name);
+      if (typeof item.s === "number") {
+        const score = document.createElement("span");
+        score.className = "account-score";
+        score.textContent = `${item.s}%`;
+        li.append(score);
+      }
+      li.append(remove);
       listEl.appendChild(li);
     }
   }
 
   function renderMarks(raw) {
     const marks = normalizeMarks(raw);
-    renderAccounts(els.fishList, els.fishCount, marks.fish, "fish");
-    renderAccounts(els.humanList, els.humanCount, marks.human, "human");
+    const emptyText = "还没有。在评论区点标签就能加进来。";
+    renderAccounts(els.fishList, els.fishCount, marks.fish, {
+      emptyText,
+      onRemove: (mid) => removeMark(mid, "fish")
+    });
+    renderAccounts(els.humanList, els.humanCount, marks.human, {
+      emptyText,
+      onRemove: (mid) => removeMark(mid, "human")
+    });
   }
 
   function renderMemory(raw) {
-    els.memoryCount.textContent = String(Object.keys(normalizeMemory(raw)).length);
+    const memory = normalizeMemory(raw);
+    const total = Object.keys(memory).length;
+    renderAccounts(els.memoryList, els.memoryCount, memory, {
+      emptyText: "还没有。判到 70 分以上的鱼会自动记在这里。",
+      limit: MAX_MEMORY_ROWS,
+      onRemove: removeMemory
+    });
+    els.memoryNote.textContent =
+      total > MAX_MEMORY_ROWS ? `只列出最近的 ${MAX_MEMORY_ROWS} 个` : "换个视频遇到它们也认得";
+    els.clearMemory.hidden = total === 0;
+  }
+
+  function removeMemory(mid) {
+    chrome.storage.local.get([STORAGE_KEYS.memory], (result) => {
+      const next = normalizeMemory(result && result[STORAGE_KEYS.memory]);
+      delete next[mid];
+      chrome.storage.local.set({ [STORAGE_KEYS.memory]: next }, () => showToast("已从记忆里移除"));
+    });
   }
 
   function removeMark(mid, kind) {
@@ -180,6 +233,24 @@
     chrome.storage.local.set({ [STORAGE_KEYS.config]: config }, () => {
       showToast(message || "已应用");
     });
+  }
+
+  /** 表单里任何一项变了都重新比对一次 */
+  function watchForm() {
+    const inputs = [
+      ...modeInputs,
+      els.thresholdRange,
+      els.blockFish,
+      els.blockOfficial,
+      els.blockKeywords,
+      els.checkAvatar,
+      els.whaleNames,
+      els.keywordList
+    ];
+    for (const input of inputs) {
+      input.addEventListener("input", refreshDirty);
+      input.addEventListener("change", refreshDirty);
+    }
   }
 
   // ---------------- 事件绑定 ----------------
@@ -207,11 +278,12 @@
   });
 
   els.saveBtn.addEventListener("click", () => {
-    saveConfig(readFormConfig());
+    const config = readFormConfig();
+    saveConfig(config);
+    savedSnapshot = snapshot(config);
+    refreshDirty();
     els.saveBtn.textContent = "已应用 ✔";
-    setTimeout(() => {
-      els.saveBtn.textContent = "保存并应用";
-    }, 1200);
+    setTimeout(refreshDirty, 1200);
   });
 
   els.resetBtn.addEventListener("click", () => {
@@ -226,6 +298,7 @@
     els.whaleNames.value = DEFAULT_CONFIG.whaleNames.join("\n");
     els.keywordList.value = DEFAULT_CONFIG.keywords.join("\n");
     syncFormState();
+    refreshDirty();
     showToast("已恢复默认值（尚未保存）");
   });
 
@@ -257,6 +330,8 @@
   chrome.storage.local.get(initialKeys, (result) => {
     const stored = result || {};
     fillForm(stored[STORAGE_KEYS.config]);
+    savedSnapshot = snapshot(normalizeConfig(stored[STORAGE_KEYS.config]));
+    watchForm();
     updateCountLabel(stored[STORAGE_KEYS.count]);
     renderMarks(stored[STORAGE_KEYS.marks]);
     renderMemory(stored[STORAGE_KEYS.memory]);

@@ -311,3 +311,57 @@ test("判定结果永远包含 reasons / matched 结构，便于提示气泡使�
   assert.ok(result.reasons.every((reason) => typeof reason === "string"));
   assert.ok(result.matched);
 });
+
+/* ---------------- v2.0.1：弱信号叠加、特征词与鱼灾分开算 ---------------- */
+
+test("特征词凑过线的评论不算鱼，也不带鱼灾分数（不会被记进账号记忆）", () => {
+  const result = detect({
+    userName: "路人",
+    content: "【AI总结】这期视频讲了「三件事」，很清楚",
+    level: 4
+  });
+  assert.equal(result.score, 60);
+  assert.equal(result.isWhale, false);
+  assert.equal(result.fishScore, 0);
+  assert.ok(result.badgeText.includes("疑似AI"));
+});
+
+test("鱼灾部分自己够线时，叠加特征词仍然算鱼，鱼灾分数单独给出", () => {
+  const result = detect({ userName: "阿尔法的大肥鱼", content: "【AI总结】今天也很努力", level: 0 });
+  assert.equal(result.isWhale, true);
+  assert.equal(result.fishScore, 63);
+  assert.equal(result.score, 99);
+});
+
+test("只有弱昵称 + 排版 + 新号，不打标", () => {
+  assert.equal(detect({ userName: "鲸落", content: "这个「名场面」笑死我了", level: 3 }).score, 0);
+  assert.equal(detect({ userName: "robot_fan", content: "好看——真的好看啊", level: 2 }).score, 0);
+});
+
+test("弱昵称 + 蓝头像 + 新号最多 69 分，到不了默认自动处理线", () => {
+  const result = detect({
+    userName: "鲸落",
+    content: "这个「名场面」笑死我了",
+    level: 3,
+    avatarBlue: 45
+  });
+  assert.equal(result.score, 69);
+  assert.equal(result.fishScore, 69);
+  assert.ok(!result.reasons.join("、").includes("排版"));
+});
+
+test("有像样的信号时，弱正文特征照常计分", () => {
+  const withQuote = detect({ userName: "阿尔法的大肥鱼", content: "这个「名场面」不错", level: 0 });
+  const plain = detect({ userName: "阿尔法的大肥鱼", content: "这个名场面不错", level: 0 });
+  assert.ok(withQuote.score > plain.score);
+});
+
+test("老号减分不扣特征词库的分数", () => {
+  const result = detect({ userName: "课代表小王", content: "【视频总结】1. 开头 2. 中间", level: 6 });
+  assert.equal(result.score, 60);
+  assert.ok(!result.reasons.join("、").includes("老号减分"));
+});
+
+test("老号减分仍然作用于弱的鱼灾信号", () => {
+  assert.equal(detect({ userName: "小明", content: "这个比喻我收了，太妙了", level: 6 }).score, 0);
+});
